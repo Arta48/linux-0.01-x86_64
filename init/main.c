@@ -6,6 +6,7 @@
 #include <linux/syscall.h>
 #include <linux/fs.h>
 #include <linux/signal.h>
+#include <linux/time.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -133,78 +134,22 @@ static inline int64_t u_brk(uint64_t new_brk)
     return u_syscall(__NR_brk, new_brk, 0, 0);
 }
 
-static inline int64_t u_list(const char *path, char *buf, uint64_t max_len)
+static inline int64_t u_list(const char *path, char *buf, uint64_t max_len, int is_long)
 {
-    return u_syscall(__NR_list, (uint64_t)path, (uint64_t)buf, max_len);
+    register uint64_t r10 __asm__("r10") = (uint64_t)is_long;
+    int64_t ret;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(__NR_list), "D"((uint64_t)path), "S"((uint64_t)buf), "d"(max_len), "r"(r10)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
 }
 
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
-}
-
-/* Аллокатор памяти malloc / free */
-struct block_header {
-    uint64_t size;
-    int is_free;
-    struct block_header *next;
-};
-
-static struct block_header *heap_head = NULL;
-
-static void *u_sbrk(int64_t increment)
-{
-    uint64_t cur_brk = (uint64_t)u_brk(0);
-    if (increment == 0) return (void *)cur_brk;
-    uint64_t new_brk = cur_brk + increment;
-    uint64_t res = (uint64_t)u_brk(new_brk);
-    if (res < new_brk) return (void *)-1;
-    return (void *)cur_brk;
-}
-
-static void *u_malloc(uint64_t size)
-{
-    if (size == 0) return NULL;
-    size = (size + 15) & ~15ULL;
-    struct block_header *curr = heap_head;
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            curr->is_free = 0;
-            return (void *)(curr + 1);
-        }
-        curr = curr->next;
-    }
-    uint64_t total_size = sizeof(struct block_header) + size;
-    void *raw = u_sbrk((int64_t)total_size);
-    if (raw == (void *)-1) return NULL;
-    struct block_header *new_block = (struct block_header *)raw;
-    new_block->size = size;
-    new_block->is_free = 0;
-    new_block->next = NULL;
-    if (!heap_head) {
-        heap_head = new_block;
-    } else {
-        curr = heap_head;
-        while (curr->next) curr = curr->next;
-        curr->next = new_block;
-    }
-    return (void *)(new_block + 1);
-}
-
-static void u_free(void *ptr)
-{
-    if (!ptr) return;
-    struct block_header *hdr = (struct block_header *)ptr - 1;
-    hdr->is_free = 1;
-    struct block_header *curr = heap_head;
-    while (curr && curr->next) {
-        if (curr->is_free && curr->next->is_free) {
-            curr->size += sizeof(struct block_header) + curr->next->size;
-            curr->next = curr->next->next;
-        } else {
-            curr = curr->next;
-        }
-    }
 }
 
 /* Строковые вспомогательные функции */
@@ -280,6 +225,71 @@ static int u_atoi(const char *s)
         s++;
     }
     return res;
+}
+
+/* Преобразование секунд Unix Epoch в дату и время */
+static const char *day_names[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+static const char *mon_names[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+static const int days_in_month[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+static void print_date(uint64_t epoch)
+{
+    uint64_t sec = epoch % 60;
+    uint64_t min = (epoch / 60) % 60;
+    uint64_t hour = (epoch / 3600) % 24;
+    uint64_t days = epoch / 86400;
+
+    int wday = (days + 4) % 7; /* 1 янв 1970 был четвергом */
+
+    int year = 1970;
+    while (1) {
+        int leap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+        int ydays = leap ? 366 : 365;
+        if (days >= (uint64_t)ydays) {
+            days -= ydays;
+            year++;
+        } else {
+            break;
+        }
+    }
+
+    int leap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+    int mon = 0;
+    while (mon < 12) {
+        int mdays = days_in_month[mon];
+        if (mon == 1 && leap) mdays = 29;
+        if (days >= (uint64_t)mdays) {
+            days -= mdays;
+            mon++;
+        } else {
+            break;
+        }
+    }
+    int mday = days + 1;
+
+    u_print(day_names[wday]);
+    u_print(" ");
+    u_print(mon_names[mon]);
+    u_print(" ");
+    if (mday < 10) u_print(" ");
+    u_print_num(mday);
+    u_print(" ");
+
+    if (hour < 10) u_print("0");
+    u_print_num(hour);
+    u_print(":");
+    if (min < 10) u_print("0");
+    u_print_num(min);
+    u_print(":");
+    if (sec < 10) u_print("0");
+    u_print_num(sec);
+
+    u_print(" UTC ");
+    u_print_num(year);
+    u_print("\n");
 }
 
 static volatile int sigint_received = 0;
@@ -401,21 +411,24 @@ static void execute_command(const char *cmd)
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
+        u_print("  date            - display current real CMOS RTC date/time\n");
         u_print("  pwd / cd [dir]  - directory navigation\n");
-        u_print("  ls [dir]        - list files in directory\n");
+        u_print("  ls [-l] [dir]   - list files (supports detailed -l flag)\n");
         u_print("  mkdir / rmdir   - directory management\n");
         u_print("  cat [file]      - display file contents (or stdin)\n");
         u_print("  touch / rm      - create or remove files\n");
         u_print("  cmd > <file>    - redirect command output to file\n");
         u_print("  cmd1 | cmd2     - execute Unix pipeline\n");
         u_print("  <binary>        - execute binary via fork() + execve()\n");
-        u_print("  heap / malloc   - dynamic memory management\n");
-        u_print("  malloctest      - stress test malloc() and free()\n");
         u_print("  sleep <sec>     - sleep N seconds (interruptible by Ctrl+C)\n");
         u_print("  sigtest         - test Ring 3 custom SIGINT handler\n");
+        u_print("  heap / malloc   - dynamic memory management\n");
         u_print("  ps / kill / wait- process management\n");
         u_print("  bench           - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  clear / exit    - terminal control\n");
+    } else if (u_strcmp(cmd, "date") == 0) {
+        uint64_t epoch = (uint64_t)u_time();
+        print_date(epoch);
     } else if (u_strcmp(cmd, "pwd") == 0) {
         char buf[64];
         if (u_getcwd(buf, sizeof(buf)) >= 0) {
@@ -435,20 +448,22 @@ static void execute_command(const char *cmd)
     } else if (u_strncmp(cmd, "mkdir ", 6) == 0) {
         const char *dname = cmd + 6;
         while (*dname == ' ') dname++;
-        if (u_mkdir(dname) != 0) {
-            u_print("mkdir: cannot create directory\n");
-        }
+        if (u_mkdir(dname) != 0) u_print("mkdir: failed\n");
     } else if (u_strncmp(cmd, "rmdir ", 6) == 0) {
         const char *dname = cmd + 6;
         while (*dname == ' ') dname++;
-        if (u_rmdir(dname) != 0) {
-            u_print("rmdir: cannot remove directory\n");
-        }
+        if (u_rmdir(dname) != 0) u_print("rmdir: failed\n");
     } else if (u_strncmp(cmd, "ls", 2) == 0 && (cmd[2] == ' ' || cmd[2] == '\0')) {
         const char *arg = cmd + 2;
         while (*arg == ' ') arg++;
-        char buf[512];
-        if (u_list(arg, buf, sizeof(buf)) > 0) {
+        int is_long = 0;
+        if (u_strncmp(arg, "-l", 2) == 0) {
+            is_long = 1;
+            arg += 2;
+            while (*arg == ' ') arg++;
+        }
+        char buf[1024];
+        if (u_list(arg, buf, sizeof(buf), is_long) > 0) {
             u_print(buf);
         }
     } else if (u_strncmp(cmd, "touch ", 6) == 0) {
@@ -497,38 +512,6 @@ static void execute_command(const char *cmd)
         u_print("\n  Heap Size   : ");
         u_print_num(heap_size);
         u_print(" bytes\n");
-    } else if (u_strncmp(cmd, "malloc ", 7) == 0) {
-        uint64_t sz = (uint64_t)u_atoi(cmd + 7);
-        if (sz == 0) return;
-        void *ptr = u_malloc(sz);
-        if (!ptr) {
-            u_print("malloc: out of memory!\n");
-        } else {
-            u_print("Allocated ");
-            u_print_num(sz);
-            u_print(" bytes at address: ");
-            u_print_hex((uint64_t)ptr);
-            u_print("\nFreeing block...\n");
-            u_free(ptr);
-        }
-    } else if (u_strcmp(cmd, "malloctest") == 0) {
-        u_print("--- Running malloc / free Stress Test ---\n");
-        char *b1 = (char *)u_malloc(64);
-        char *b2 = (char *)u_malloc(256);
-        char *b3 = (char *)u_malloc(1024);
-        u_print("1. B1 at "); u_print_hex((uint64_t)b1); u_print("\n");
-        u_print("   B2 at "); u_print_hex((uint64_t)b2); u_print("\n");
-        u_print("   B3 at "); u_print_hex((uint64_t)b3); u_print("\n");
-        u_free(b2);
-        char *b4 = (char *)u_malloc(128);
-        u_print("2. B4 at "); u_print_hex((uint64_t)b4);
-        if (b4 == b2) u_print(" (REUSED B2!)\n"); else u_print("\n");
-        u_free(b1); u_free(b4); u_free(b3);
-        char *b5 = (char *)u_malloc(2048);
-        u_print("3. B5 at "); u_print_hex((uint64_t)b5);
-        if (b5 == b1) u_print(" (COALESCED SUCCESS!)\n"); else u_print("\n");
-        u_free(b5);
-        u_print("--- Malloc Test Passed! ---\n");
     } else if (u_strncmp(cmd, "sleep ", 6) == 0) {
         int sec = u_atoi(cmd + 6);
         if (sec <= 0) sec = 1;
@@ -540,7 +523,7 @@ static void execute_command(const char *cmd)
         int64_t pid = u_fork();
         if (pid == 0) {
             uint64_t start = (uint64_t)u_time();
-            while ((uint64_t)u_time() - start < (uint64_t)(sec * 100)) {}
+            while ((uint64_t)u_time() - start < (uint64_t)sec) {}
             u_exit(0);
         } else if (pid > 0) {
             int status = 0;
@@ -610,7 +593,7 @@ static void execute_command(const char *cmd)
     } else if (u_strcmp(cmd, "uptime") == 0) {
         uint64_t ticks = (uint64_t)u_time();
         u_print("Uptime: ");
-        u_print_num(ticks / 100);
+        u_print_num(ticks - startup_time);
         u_print(" seconds\n");
     } else if (u_strcmp(cmd, "getpid") == 0) {
         u_print("Current PID: ");
@@ -626,8 +609,8 @@ static void execute_command(const char *cmd)
         uint64_t s_fast = (uint64_t)u_time();
         for (int i = 0; i < 500000; i++) u_syscall(__NR_getpid, 0, 0, 0);
         uint64_t t_fast = (uint64_t)u_time() - s_fast;
-        u_print("int 0x80: "); u_print_num(t_int); u_print(" jiffies\n");
-        u_print("syscall : "); u_print_num(t_fast); u_print(" jiffies\n");
+        u_print("int 0x80: "); u_print_num(t_int); u_print(" sec\n");
+        u_print("syscall : "); u_print_num(t_fast); u_print(" sec\n");
     } else if (u_strcmp(cmd, "exit") == 0) {
         u_exit(0);
     } else {
@@ -733,6 +716,7 @@ void main(void)
     printk("   Linux 0.01 (x86_64 Edition) Booting...    \n");
     printk("==============================================\n\n");
 
+    time_init();
     gdt_init();
     trap_init();
     syscall_init();

@@ -9,7 +9,7 @@ LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
-       kernel/syscall_entry.o fs/ramfs.o fs/pipe.o lib/string.o
+       kernel/syscall_entry.o kernel/time.o fs/ramfs.o fs/pipe.o lib/string.o
 
 all: Image
 
@@ -36,6 +36,9 @@ kernel/keyboard.o: kernel/keyboard.c
 
 kernel/fork.o: kernel/fork.c
 	$(CC) $(CFLAGS) -c kernel/fork.c -o kernel/fork.o
+
+kernel/time.o: kernel/time.c
+	$(CC) $(CFLAGS) -c kernel/time.c -o kernel/time.o
 
 fs/ramfs.o: fs/ramfs.c
 	$(CC) $(CFLAGS) -c fs/ramfs.c -o fs/ramfs.o

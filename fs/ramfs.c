@@ -3,6 +3,7 @@
 #include <linux/tty.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/time.h>
 
 static const unsigned char bin_hello[] = {
     0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
@@ -44,7 +45,6 @@ static const unsigned char bin_calc[] = {
 
 static struct ram_file ram_files[MAX_FILES];
 
-/* Преобразование пути с учетом current->cwd, '.' и '..' */
 static void resolve_path(const char *in, char *out)
 {
     char tmp[MAX_FILENAME];
@@ -76,7 +76,7 @@ static void resolve_path(const char *in, char *out)
             continue;
         } else if (strcmp(comp, "..") == 0) {
             if (ti > 1) {
-                ti--; /* Удаляем trailing / */
+                ti--;
                 while (ti > 1 && tmp[ti - 1] != '/') ti--;
             }
         } else {
@@ -101,11 +101,11 @@ void fs_init(void)
         ram_files[i].data = NULL;
         ram_files[i].size = 0;
         ram_files[i].capacity = 0;
+        ram_files[i].mtime = startup_time;
         ram_files[i].is_readonly = 0;
         ram_files[i].is_dir = 0;
     }
 
-    /* Системные каталоги */
     const char *dirs[] = { "/", "/bin", "/etc", "/home" };
     for (int i = 0; i < 4; i++) {
         uint64_t len = strlen(dirs[i]);
@@ -113,9 +113,9 @@ void fs_init(void)
         ram_files[i].is_dir = 1;
         ram_files[i].in_use = 1;
         ram_files[i].is_readonly = 1;
+        ram_files[i].mtime = startup_time;
     }
 
-    /* Системные файлы */
     const char *init_names[] = {
         "/README.txt", "/version", "/author", "/etc/motd", "/bin/hello", "/bin/calc"
     };
@@ -131,7 +131,9 @@ void fs_init(void)
         "  - Fast hardware MSR syscall / sysret\n"
         "  - Dynamic VFS with directories, cd, pwd & mkdir\n"
         "  - Unix Pipes (IPC) & dup2 redirection (> and |)\n"
-        "  - Binary execution via fork() + execve()\n",
+        "  - Binary execution via fork() + execve()\n"
+        "  - Signals & Ctrl+C interruption\n"
+        "  - Real-Time Clock (CMOS RTC) & ls -l\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
@@ -154,6 +156,7 @@ void fs_init(void)
         ram_files[idx].in_use = 1;
         ram_files[idx].is_readonly = 1;
         ram_files[idx].is_dir = 0;
+        ram_files[idx].mtime = startup_time;
     }
 
     printk("[OK] Hierarchical VFS Initialized (Dirs: /, /bin, /etc, /home)\n");
@@ -181,8 +184,8 @@ int64_t sys_open(const char *filename, int flags)
     int file_idx = -1;
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].in_use && strcmp(full, ram_files[i].name) == 0) {
-            if (ram_files[i].is_dir) return -1; /* Нельзя открыть директорию как файл */
-                file_idx = i;
+            if (ram_files[i].is_dir) return -1;
+            file_idx = i;
             break;
         }
     }
@@ -208,6 +211,7 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].data = (char *)page;
         ram_files[file_idx].size = 0;
         ram_files[file_idx].capacity = PAGE_SIZE;
+        ram_files[file_idx].mtime = get_current_time();
         ram_files[file_idx].in_use = 1;
         ram_files[file_idx].is_readonly = 0;
         ram_files[file_idx].is_dir = 0;
@@ -215,6 +219,7 @@ int64_t sys_open(const char *filename, int flags)
 
     if ((flags & O_TRUNC) && !ram_files[file_idx].is_readonly) {
         ram_files[file_idx].size = 0;
+        ram_files[file_idx].mtime = get_current_time();
     }
 
     for (int fd = 3; fd < NR_OPEN; fd++) {
@@ -258,7 +263,6 @@ int64_t sys_close(int fd)
     return 0;
 }
 
-/* ИСПРАВЛЕНИЕ: fd < 0 вместо fd < 3, чтобы чтение перенаправленных дескрипторов работало! */
 int64_t sys_file_read(int fd, char *buf, uint64_t count)
 {
     if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
@@ -289,7 +293,6 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
     return bytes_to_read;
 }
 
-/* ИСПРАВЛЕНИЕ: fd < 0 вместо fd < 3, чтобы запись перенаправленных дескрипторов работала! */
 int64_t sys_file_write(int fd, const char *buf, uint64_t count)
 {
     if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
@@ -320,6 +323,7 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
     if (f->pos > rf->size) {
         rf->size = f->pos;
     }
+    rf->mtime = get_current_time();
 
     return bytes_to_write;
 }
@@ -332,7 +336,7 @@ int64_t sys_unlink(const char *filename)
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].in_use && strcmp(full, ram_files[i].name) == 0) {
             if (ram_files[i].is_readonly || ram_files[i].is_dir) {
-                return -1; /* Нельзя удалять системные файлы и папки */
+                return -1;
             }
 
             if (ram_files[i].data) {
@@ -371,7 +375,7 @@ int64_t sys_mkdir(const char *path)
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].in_use && strcmp(full, ram_files[i].name) == 0) {
-            return -1; /* Уже существует */
+            return -1;
         }
     }
 
@@ -383,6 +387,7 @@ int64_t sys_mkdir(const char *path)
             ram_files[i].in_use = 1;
             ram_files[i].is_readonly = 0;
             ram_files[i].size = 0;
+            ram_files[i].mtime = get_current_time();
             ram_files[i].data = NULL;
             return 0;
         }
@@ -407,12 +412,11 @@ int64_t sys_rmdir(const char *path)
     }
     if (dir_idx == -1) return -1;
 
-    /* Проверяем, пуста ли папка */
     uint64_t dlen = strlen(full);
     for (int i = 0; i < MAX_FILES; i++) {
         if (i != dir_idx && ram_files[i].in_use) {
             if (strncmp(ram_files[i].name, full, dlen) == 0 && ram_files[i].name[dlen] == '/') {
-                return -1; /* Папка не пуста */
+                return -1;
             }
         }
     }
@@ -430,8 +434,13 @@ int64_t sys_getcwd(char *buf, uint64_t size)
     return len;
 }
 
-/* Список файлов и папок внутри указанной директории */
-int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len)
+static const char *month_names[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+
+/* Поддержка обычного ls и подробного ls -l */
+int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
 {
     char target[MAX_FILENAME];
     if (dir_path && dir_path[0] != '\0') {
@@ -449,13 +458,12 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len)
 
         const char *name = ram_files[i].name;
 
-        /* Фильтруем файлы внутри target */
         int match = 0;
         if (strcmp(target, "/") == 0) {
             if (name[0] == '/' && name[1] != '\0') {
                 const char *sub = name + 1;
                 while (*sub && *sub != '/') sub++;
-                if (*sub == '\0') match = 1; /* Прямой потомок корня */
+                if (*sub == '\0') match = 1;
             }
         } else {
             if (strncmp(name, target, tlen) == 0 && name[tlen] == '/') {
@@ -467,31 +475,57 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len)
 
         if (match) {
             const char *display = (strcmp(target, "/") == 0) ? name + 1 : name + tlen + 1;
-            while (*display && offset < max_len - 16) {
-                buf[offset++] = *display++;
-            }
 
-            if (ram_files[i].is_dir) {
-                buf[offset++] = '/';
-                buf[offset++] = '\n';
-            } else {
-                buf[offset++] = '\t';
-                buf[offset++] = '(';
-                char num[16];
-                int ni = 0;
+            if (is_long) {
+                /* Права доступа: drwxr-xr-x для каталогов, -rw-r--r-- для файлов */
+                const char *perms = ram_files[i].is_dir ? "drwxr-xr-x  " :
+                (ram_files[i].is_readonly ? "-rwxr-xr-x  " : "-rw-r--r--  ");
+                while (*perms && offset < max_len - 32) buf[offset++] = *perms++;
+
+                /* Размер в байтах */
+                char szbuf[16];
+                int szi = 0;
                 uint64_t sz = ram_files[i].size;
-                if (sz == 0) num[ni++] = '0';
+                if (sz == 0) szbuf[szi++] = '0';
                 while (sz > 0) {
-                    num[ni++] = '0' + (sz % 10);
+                    szbuf[szi++] = '0' + (sz % 10);
                     sz /= 10;
                 }
-                while (--ni >= 0 && offset < max_len - 8) {
-                    buf[offset++] = num[ni];
-                }
-                buf[offset++] = ' ';
+                while (szi < 6) szbuf[szi++] = ' '; /* Выравнивание */
+                    while (--szi >= 0 && offset < max_len - 16) buf[offset++] = szbuf[szi];
+                    buf[offset++] = ' ';
                 buf[offset++] = 'B';
-                buf[offset++] = ')';
+                buf[offset++] = ' ';
+                buf[offset++] = ' ';
+
+                /* Имя файла */
+                while (*display && offset < max_len - 16) buf[offset++] = *display++;
+                if (ram_files[i].is_dir) buf[offset++] = '/';
                 buf[offset++] = '\n';
+            } else {
+                /* Компактный вывод */
+                while (*display && offset < max_len - 16) buf[offset++] = *display++;
+
+                if (ram_files[i].is_dir) {
+                    buf[offset++] = '/';
+                    buf[offset++] = '\n';
+                } else {
+                    buf[offset++] = '\t';
+                    buf[offset++] = '(';
+                    char num[16];
+                    int ni = 0;
+                    uint64_t sz = ram_files[i].size;
+                    if (sz == 0) num[ni++] = '0';
+                    while (sz > 0) {
+                        num[ni++] = '0' + (sz % 10);
+                        sz /= 10;
+                    }
+                    while (--ni >= 0 && offset < max_len - 8) buf[offset++] = num[ni];
+                    buf[offset++] = ' ';
+                    buf[offset++] = 'B';
+                    buf[offset++] = ')';
+                    buf[offset++] = '\n';
+                }
             }
         }
     }

@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/string.h>
+#include <linux/time.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -127,7 +128,7 @@ static int64_t sys_getpid(void)
 
 static int64_t sys_time(void)
 {
-    return (int64_t)jiffies;
+    return (int64_t)get_current_time();
 }
 
 static void sys_ps(void)
@@ -371,8 +372,7 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             ret = 0;
             break;
         case __NR_list:
-            ret = sys_list((const char *)arg1, (char *)arg2, arg3);
-            break;
+            return sys_list((const char *)arg1, (char *)arg2, arg3, (int)tf->rbx);
         case __NR_waitpid:
             ret = sys_waitpid((int64_t)arg1, (int *)arg2, (int)arg3);
             break;
