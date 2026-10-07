@@ -13,7 +13,6 @@
 #define TASK_ZOMBIE          3
 #define TASK_STOPPED         4
 
-/* Куча процессов начинается с виртуального адреса 1 ГБ (0x40000000) */
 #define HEAP_START_VIRT 0x40000000ULL
 
 struct task_struct {
@@ -23,11 +22,12 @@ struct task_struct {
     long counter;
     long priority;
     long pid;
-    long father;               /* PID родителя */
-    int exit_code;             /* Код возврата */
-    uint64_t user_stack_page;  /* Физическая страница стека пользователя */
-    uint64_t start_brk;        /* Начало кучи (Heap) */
-    uint64_t brk;              /* Текущая граница кучи (Program Break) */
+    long father;
+    int exit_code;
+    uint64_t user_stack_page;
+    uint64_t start_brk;
+    uint64_t brk;
+    char cwd[64];              /* Текущий рабочий каталог процесса */
     struct file filp[NR_OPEN];
 };
 

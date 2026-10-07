@@ -42,8 +42,56 @@ static const unsigned char bin_calc[] = {
     'R', 'i', 'n', 'g', ' ', '3', '.', '.', '.', '\n', '\0'
 };
 
-/* Таблица файлов RamFS на 32 слота */
 static struct ram_file ram_files[MAX_FILES];
+
+/* Преобразование пути с учетом current->cwd, '.' и '..' */
+static void resolve_path(const char *in, char *out)
+{
+    char tmp[MAX_FILENAME];
+    uint64_t ti = 0;
+
+    if (in[0] == '/') {
+        tmp[ti++] = '/';
+        in++;
+    } else {
+        const char *c = current->cwd;
+        while (*c && ti < MAX_FILENAME - 2) tmp[ti++] = *c++;
+        if (tmp[ti - 1] != '/') tmp[ti++] = '/';
+    }
+
+    while (*in && ti < MAX_FILENAME - 1) {
+        if (*in == '/') {
+            in++;
+            continue;
+        }
+
+        char comp[MAX_FILENAME];
+        uint64_t ci = 0;
+        while (*in && *in != '/' && ci < MAX_FILENAME - 1) {
+            comp[ci++] = *in++;
+        }
+        comp[ci] = '\0';
+
+        if (strcmp(comp, ".") == 0) {
+            continue;
+        } else if (strcmp(comp, "..") == 0) {
+            if (ti > 1) {
+                ti--; /* Удаляем trailing / */
+                while (ti > 1 && tmp[ti - 1] != '/') ti--;
+            }
+        } else {
+            if (tmp[ti - 1] != '/') tmp[ti++] = '/';
+            for (uint64_t k = 0; k < ci && ti < MAX_FILENAME - 1; k++) {
+                tmp[ti++] = comp[k];
+            }
+        }
+    }
+
+    if (ti > 1 && tmp[ti - 1] == '/') ti--;
+    tmp[ti] = '\0';
+
+    memcpy(out, tmp, ti + 1);
+}
 
 void fs_init(void)
 {
@@ -54,10 +102,23 @@ void fs_init(void)
         ram_files[i].size = 0;
         ram_files[i].capacity = 0;
         ram_files[i].is_readonly = 0;
+        ram_files[i].is_dir = 0;
     }
 
-    /* Инициализируем системные файлы (Read-Only) */
-    const char *init_names[] = { "README.txt", "version", "author", "motd", "hello", "calc" };
+    /* Системные каталоги */
+    const char *dirs[] = { "/", "/bin", "/etc", "/home" };
+    for (int i = 0; i < 4; i++) {
+        uint64_t len = strlen(dirs[i]);
+        memcpy(ram_files[i].name, dirs[i], len + 1);
+        ram_files[i].is_dir = 1;
+        ram_files[i].in_use = 1;
+        ram_files[i].is_readonly = 1;
+    }
+
+    /* Системные файлы */
+    const char *init_names[] = {
+        "/README.txt", "/version", "/author", "/etc/motd", "/bin/hello", "/bin/calc"
+    };
     const char *init_data[] = {
         "====================================================\n"
         "  Linux 0.01 (x86_64 Edition)\n"
@@ -68,10 +129,9 @@ void fs_init(void)
         "  - Preemptive multitasking & decay scheduler\n"
         "  - Ring 3 user space isolation via TSS.rsp0\n"
         "  - Fast hardware MSR syscall / sysret\n"
-        "  - In-memory Virtual File System (RamFS)\n"
-        "  - Inter-Process Communication (Unix Pipes)\n"
-        "  - Binary program loader (sys_execve)\n"
-        "  - Writable VFS, touch, rm & shell I/O redirection\n",
+        "  - Dynamic VFS with directories, cd, pwd & mkdir\n"
+        "  - Unix Pipes (IPC) & dup2 redirection (> and |)\n"
+        "  - Binary execution via fork() + execve()\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
@@ -85,24 +145,27 @@ void fs_init(void)
     };
 
     for (int i = 0; i < 6; i++) {
+        int idx = 4 + i;
         uint64_t nlen = strlen(init_names[i]);
-        if (nlen >= MAX_FILENAME) nlen = MAX_FILENAME - 1;
-        memcpy(ram_files[i].name, init_names[i], nlen);
-        ram_files[i].name[nlen] = '\0';
-        ram_files[i].data = (char *)init_data[i];
-        ram_files[i].size = (i < 4) ? strlen(init_data[i]) : init_sizes[i];
-        ram_files[i].capacity = ram_files[i].size;
-        ram_files[i].in_use = 1;
-        ram_files[i].is_readonly = 1; /* Системные файлы защищены от удаления */
+        memcpy(ram_files[idx].name, init_names[i], nlen + 1);
+        ram_files[idx].data = (char *)init_data[i];
+        ram_files[idx].size = (i < 4) ? strlen(init_data[i]) : init_sizes[i];
+        ram_files[idx].capacity = ram_files[idx].size;
+        ram_files[idx].in_use = 1;
+        ram_files[idx].is_readonly = 1;
+        ram_files[idx].is_dir = 0;
     }
 
-    printk("[OK] Dynamic Virtual File System Initialized (32 file slots)\n");
+    printk("[OK] Hierarchical VFS Initialized (Dirs: /, /bin, /etc, /home)\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
 {
+    char full[MAX_FILENAME];
+    resolve_path(name, full);
+
     for (int i = 0; i < MAX_FILES; i++) {
-        if (ram_files[i].in_use && strcmp(name, ram_files[i].name) == 0) {
+        if (ram_files[i].in_use && !ram_files[i].is_dir && strcmp(full, ram_files[i].name) == 0) {
             if (out_size) *out_size = ram_files[i].size;
             return ram_files[i].data;
         }
@@ -112,51 +175,48 @@ const char *fs_get_file_data(const char *name, uint64_t *out_size)
 
 int64_t sys_open(const char *filename, int flags)
 {
+    char full[MAX_FILENAME];
+    resolve_path(filename, full);
+
     int file_idx = -1;
     for (int i = 0; i < MAX_FILES; i++) {
-        if (ram_files[i].in_use && strcmp(filename, ram_files[i].name) == 0) {
-            file_idx = i;
+        if (ram_files[i].in_use && strcmp(full, ram_files[i].name) == 0) {
+            if (ram_files[i].is_dir) return -1; /* Нельзя открыть директорию как файл */
+                file_idx = i;
             break;
         }
     }
 
-    /* Файл не найден: создаем, если передан O_CREAT */
     if (file_idx == -1) {
         if (!(flags & O_CREAT)) {
             return -1;
         }
 
-        /* Ищем свободный слот в таблице RamFS */
         for (int i = 0; i < MAX_FILES; i++) {
             if (!ram_files[i].in_use) {
                 file_idx = i;
                 break;
             }
         }
-        if (file_idx == -1) return -1; /* Нет свободных слотов */
+        if (file_idx == -1) return -1;
 
-            /* Выделяем страницу памяти 4 КБ под данные нового файла */
-            uint64_t page = get_free_page();
+        uint64_t page = get_free_page();
         if (!page) return -1;
 
-        uint64_t nlen = strlen(filename);
-        if (nlen >= MAX_FILENAME) nlen = MAX_FILENAME - 1;
-        memcpy(ram_files[file_idx].name, filename, nlen);
-        ram_files[file_idx].name[nlen] = '\0';
-
+        uint64_t nlen = strlen(full);
+        memcpy(ram_files[file_idx].name, full, nlen + 1);
         ram_files[file_idx].data = (char *)page;
         ram_files[file_idx].size = 0;
         ram_files[file_idx].capacity = PAGE_SIZE;
         ram_files[file_idx].in_use = 1;
         ram_files[file_idx].is_readonly = 0;
+        ram_files[file_idx].is_dir = 0;
     }
 
-    /* Очистка содержимого при O_TRUNC */
     if ((flags & O_TRUNC) && !ram_files[file_idx].is_readonly) {
         ram_files[file_idx].size = 0;
     }
 
-    /* Ищем свободный дескриптор в filp[] процесса */
     for (int fd = 3; fd < NR_OPEN; fd++) {
         if (!current->filp[fd].in_use) {
             current->filp[fd].type = FILE_TYPE_REGULAR;
@@ -198,9 +258,10 @@ int64_t sys_close(int fd)
     return 0;
 }
 
+/* ИСПРАВЛЕНИЕ: fd < 0 вместо fd < 3, чтобы чтение перенаправленных дескрипторов работало! */
 int64_t sys_file_read(int fd, char *buf, uint64_t count)
 {
-    if (fd < 3 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
         return -1;
     }
 
@@ -228,9 +289,10 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
     return bytes_to_read;
 }
 
+/* ИСПРАВЛЕНИЕ: fd < 0 вместо fd < 3, чтобы запись перенаправленных дескрипторов работала! */
 int64_t sys_file_write(int fd, const char *buf, uint64_t count)
 {
-    if (fd < 3 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
         return -1;
     }
 
@@ -242,7 +304,7 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
 
     struct ram_file *rf = f->rf;
     if (!rf || rf->is_readonly) {
-        return -1; /* Запрещена запись в защищенные файлы */
+        return -1;
     }
 
     uint64_t bytes_to_write = count;
@@ -262,16 +324,17 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
     return bytes_to_write;
 }
 
-/* sys_unlink: удаление файла и освобождение его памяти */
 int64_t sys_unlink(const char *filename)
 {
+    char full[MAX_FILENAME];
+    resolve_path(filename, full);
+
     for (int i = 0; i < MAX_FILES; i++) {
-        if (ram_files[i].in_use && strcmp(filename, ram_files[i].name) == 0) {
-            if (ram_files[i].is_readonly) {
-                return -1; /* Нельзя удалять системные файлы */
+        if (ram_files[i].in_use && strcmp(full, ram_files[i].name) == 0) {
+            if (ram_files[i].is_readonly || ram_files[i].is_dir) {
+                return -1; /* Нельзя удалять системные файлы и папки */
             }
 
-            /* Освобождаем память данных файла */
             if (ram_files[i].data) {
                 free_page((uint64_t)ram_files[i].data);
             }
@@ -280,43 +343,157 @@ int64_t sys_unlink(const char *filename)
             ram_files[i].name[0] = '\0';
             ram_files[i].data = NULL;
             ram_files[i].size = 0;
-            ram_files[i].capacity = 0;
             return 0;
         }
     }
     return -1;
 }
 
-int64_t sys_list(char *buf, uint64_t max_len)
+int64_t sys_chdir(const char *path)
 {
+    char full[MAX_FILENAME];
+    resolve_path(path, full);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].in_use && ram_files[i].is_dir && strcmp(full, ram_files[i].name) == 0) {
+            uint64_t len = strlen(full);
+            memcpy(current->cwd, full, len + 1);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int64_t sys_mkdir(const char *path)
+{
+    char full[MAX_FILENAME];
+    resolve_path(path, full);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].in_use && strcmp(full, ram_files[i].name) == 0) {
+            return -1; /* Уже существует */
+        }
+    }
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!ram_files[i].in_use) {
+            uint64_t len = strlen(full);
+            memcpy(ram_files[i].name, full, len + 1);
+            ram_files[i].is_dir = 1;
+            ram_files[i].in_use = 1;
+            ram_files[i].is_readonly = 0;
+            ram_files[i].size = 0;
+            ram_files[i].data = NULL;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int64_t sys_rmdir(const char *path)
+{
+    char full[MAX_FILENAME];
+    resolve_path(path, full);
+
+    if (strcmp(full, "/") == 0) return -1;
+
+    int dir_idx = -1;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].in_use && ram_files[i].is_dir && strcmp(full, ram_files[i].name) == 0) {
+            if (ram_files[i].is_readonly) return -1;
+            dir_idx = i;
+            break;
+        }
+    }
+    if (dir_idx == -1) return -1;
+
+    /* Проверяем, пуста ли папка */
+    uint64_t dlen = strlen(full);
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (i != dir_idx && ram_files[i].in_use) {
+            if (strncmp(ram_files[i].name, full, dlen) == 0 && ram_files[i].name[dlen] == '/') {
+                return -1; /* Папка не пуста */
+            }
+        }
+    }
+
+    ram_files[dir_idx].in_use = 0;
+    ram_files[dir_idx].name[0] = '\0';
+    return 0;
+}
+
+int64_t sys_getcwd(char *buf, uint64_t size)
+{
+    uint64_t len = strlen(current->cwd);
+    if (len >= size) return -1;
+    memcpy(buf, current->cwd, len + 1);
+    return len;
+}
+
+/* Список файлов и папок внутри указанной директории */
+int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len)
+{
+    char target[MAX_FILENAME];
+    if (dir_path && dir_path[0] != '\0') {
+        resolve_path(dir_path, target);
+    } else {
+        memcpy(target, current->cwd, strlen(current->cwd) + 1);
+    }
+
+    uint64_t tlen = strlen(target);
     uint64_t offset = 0;
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (!ram_files[i].in_use) continue;
+        if (strcmp(ram_files[i].name, target) == 0) continue;
 
         const char *name = ram_files[i].name;
-        while (*name && offset < max_len - 16) {
-            buf[offset++] = *name++;
-        }
-        buf[offset++] = '\t';
-        buf[offset++] = '(';
 
-        char num[16];
-        int ni = 0;
-        uint64_t sz = ram_files[i].size;
-        if (sz == 0) num[ni++] = '0';
-        while (sz > 0) {
-            num[ni++] = '0' + (sz % 10);
-            sz /= 10;
-        }
-        while (--ni >= 0 && offset < max_len - 8) {
-            buf[offset++] = num[ni];
+        /* Фильтруем файлы внутри target */
+        int match = 0;
+        if (strcmp(target, "/") == 0) {
+            if (name[0] == '/' && name[1] != '\0') {
+                const char *sub = name + 1;
+                while (*sub && *sub != '/') sub++;
+                if (*sub == '\0') match = 1; /* Прямой потомок корня */
+            }
+        } else {
+            if (strncmp(name, target, tlen) == 0 && name[tlen] == '/') {
+                const char *sub = name + tlen + 1;
+                while (*sub && *sub != '/') sub++;
+                if (*sub == '\0') match = 1;
+            }
         }
 
-        buf[offset++] = ' ';
-        buf[offset++] = 'B';
-        buf[offset++] = ')';
-        buf[offset++] = '\n';
+        if (match) {
+            const char *display = (strcmp(target, "/") == 0) ? name + 1 : name + tlen + 1;
+            while (*display && offset < max_len - 16) {
+                buf[offset++] = *display++;
+            }
+
+            if (ram_files[i].is_dir) {
+                buf[offset++] = '/';
+                buf[offset++] = '\n';
+            } else {
+                buf[offset++] = '\t';
+                buf[offset++] = '(';
+                char num[16];
+                int ni = 0;
+                uint64_t sz = ram_files[i].size;
+                if (sz == 0) num[ni++] = '0';
+                while (sz > 0) {
+                    num[ni++] = '0' + (sz % 10);
+                    sz /= 10;
+                }
+                while (--ni >= 0 && offset < max_len - 8) {
+                    buf[offset++] = num[ni];
+                }
+                buf[offset++] = ' ';
+                buf[offset++] = 'B';
+                buf[offset++] = ')';
+                buf[offset++] = '\n';
+            }
+        }
     }
 
     buf[offset] = '\0';

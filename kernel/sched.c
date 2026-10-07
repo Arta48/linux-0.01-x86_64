@@ -15,7 +15,8 @@ static union task_union init_task = {
         .exit_code = 0,
         .user_stack_page = 0,
         .start_brk = HEAP_START_VIRT,
-        .brk = HEAP_START_VIRT
+        .brk = HEAP_START_VIRT,
+        .cwd = "/"
     }
 };
 
@@ -58,6 +59,8 @@ int task_create(void (*fn)(void), long priority)
     u->task.start_brk = HEAP_START_VIRT;
     u->task.brk = HEAP_START_VIRT;
     u->task.cr3 = 0;
+    u->task.cwd[0] = '/';
+    u->task.cwd[1] = '\0';
 
     for (int fd = 0; fd < NR_OPEN; fd++) {
         u->task.filp[fd].in_use = 0;

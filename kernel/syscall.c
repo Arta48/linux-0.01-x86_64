@@ -31,13 +31,11 @@ void syscall_init(void)
     printk("[OK] Hardware 'syscall/sysret' MSRs Initialized\n");
 }
 
-/* sys_read: если дескриптор 0 перенаправлен в канал или файл, читаем из него */
 static int64_t sys_read(int fd, char *buf, uint64_t count)
 {
     if (count == 0) return 0;
     if (fd < 0 || fd >= NR_OPEN) return -1;
 
-    /* Перенаправленный дескриптор (файл или канал) */
     if (current->filp[fd].in_use) {
         if (current->filp[fd].type == FILE_TYPE_PIPE) {
             return pipe_read(&current->filp[fd], buf, count);
@@ -46,7 +44,6 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
         }
     }
 
-    /* Стандартный stdin: чтение с клавиатуры/COM1 */
     if (fd == 0) {
         uint64_t bytes_read = 0;
         while (bytes_read < count) {
@@ -69,12 +66,10 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
     return -1;
 }
 
-/* sys_write: если дескриптор 1 перенаправлен в канал или файл, пишем в него */
 static int64_t sys_write(int fd, const char *buf, uint64_t count)
 {
     if (fd < 0 || fd >= NR_OPEN) return -1;
 
-    /* Перенаправленный дескриптор (файл или канал) */
     if (current->filp[fd].in_use) {
         if (current->filp[fd].type == FILE_TYPE_PIPE) {
             return pipe_write(&current->filp[fd], buf, count);
@@ -83,7 +78,6 @@ static int64_t sys_write(int fd, const char *buf, uint64_t count)
         }
     }
 
-    /* Стандартный stdout/stderr: вывод в терминал/консоль */
     if (fd == 1 || fd == 2) {
         for (uint64_t i = 0; i < count; i++) {
             console_putc(buf[i]);
@@ -94,7 +88,6 @@ static int64_t sys_write(int fd, const char *buf, uint64_t count)
     return -1;
 }
 
-/* sys_dup2: дублирование дескриптора файла */
 static int64_t sys_dup2(int oldfd, int newfd)
 {
     if (oldfd < 0 || oldfd >= NR_OPEN) return -1;
@@ -102,21 +95,17 @@ static int64_t sys_dup2(int oldfd, int newfd)
 
     if (oldfd == newfd) return newfd;
 
-    /* Закрываем newfd, если он был открыт */
     if (current->filp[newfd].in_use) {
         sys_close(newfd);
     }
 
-    /* Если oldfd - дефолтный ввод/вывод (не привязан к файлу/каналу), сбрасываем newfd */
     if (!current->filp[oldfd].in_use) {
         current->filp[newfd].in_use = 0;
         return newfd;
     }
 
-    /* Копируем структуру дескриптора */
     current->filp[newfd] = current->filp[oldfd];
 
-    /* Если это канал, увеличиваем счетчики ссылок */
     if (current->filp[newfd].type == FILE_TYPE_PIPE && current->filp[newfd].pipe) {
         current->filp[newfd].pipe->ref_count++;
         if (current->filp[newfd].mode == 1) current->filp[newfd].pipe->readers++;
@@ -290,7 +279,6 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     current->start_brk = HEAP_START_VIRT;
     current->brk = HEAP_START_VIRT;
 
-    /* Закрываем дескрипторы 3..15, дескрипторы 0, 1, 2 сохраняются! */
     for (int i = 3; i < NR_OPEN; i++) {
         if (current->filp[i].in_use) {
             sys_close(i);
@@ -342,6 +330,14 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             return sys_unlink((const char *)arg1);
         case __NR_dup2:
             return sys_dup2((int)arg1, (int)arg2);
+        case __NR_chdir:
+            return sys_chdir((const char *)arg1);
+        case __NR_mkdir:
+            return sys_mkdir((const char *)arg1);
+        case __NR_rmdir:
+            return sys_rmdir((const char *)arg1);
+        case __NR_getcwd:
+            return sys_getcwd((char *)arg1, arg2);
         case __NR_read:
             return sys_read((int)arg1, (char *)arg2, arg3);
         case __NR_write:
@@ -354,7 +350,7 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             sys_ps();
             return 0;
         case __NR_list:
-            return sys_list((char *)arg1, arg2);
+            return sys_list((const char *)arg1, (char *)arg2, arg3);
         case __NR_waitpid:
             return sys_waitpid((int64_t)arg1, (int *)arg2, (int)arg3);
         case __NR_kill:

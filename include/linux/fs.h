@@ -4,14 +4,13 @@
 #include <linux/types.h>
 
 #define NR_OPEN       16
-#define MAX_FILENAME  32
+#define MAX_FILENAME  48
 #define MAX_FILES     32
 #define PIPE_BUF_SIZE 4064
 
 #define FILE_TYPE_REGULAR 1
 #define FILE_TYPE_PIPE    2
 
-/* Стандартные флаги open */
 #define O_RDONLY 00
 #define O_WRONLY 01
 #define O_RDWR   02
@@ -44,14 +43,15 @@ struct ram_file {
     uint64_t capacity;
     int in_use;
     int is_readonly;
+    int is_dir; /* 1 = директория, 0 = файл */
 };
 
 struct file {
-    int type;                  /* REGULAR или PIPE */
-    int mode;                  /* 1 = чтение, 2 = запись, 3 = чтение/запись */
-    uint64_t pos;              /* Текущая позиция чтения/записи */
-    struct ram_file *rf;       /* Указатель на файл в RamFS */
-    struct pipe *pipe;         /* Указатель на канал */
+    int type;
+    int mode;
+    uint64_t pos;
+    struct ram_file *rf;
+    struct pipe *pipe;
     int in_use;
 };
 
@@ -61,7 +61,12 @@ int64_t sys_close(int fd);
 int64_t sys_file_read(int fd, char *buf, uint64_t count);
 int64_t sys_file_write(int fd, const char *buf, uint64_t count);
 int64_t sys_unlink(const char *filename);
-int64_t sys_list(char *buf, uint64_t max_len);
+int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len);
+
+int64_t sys_chdir(const char *path);
+int64_t sys_mkdir(const char *path);
+int64_t sys_rmdir(const char *path);
+int64_t sys_getcwd(char *buf, uint64_t size);
 
 int64_t sys_pipe(int *pipefd);
 int64_t pipe_read(struct file *f, char *buf, uint64_t count);

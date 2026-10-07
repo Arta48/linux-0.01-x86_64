@@ -31,13 +31,13 @@ int64_t sys_fork(struct trap_frame *tf)
 
     *child = *current;
     child->pid = new_pid;
-    child->father = current->pid; /* Запоминаем родителя */
+    child->father = current->pid;
     child->exit_code = 0;
     child->state = TASK_RUNNING;
     child->counter = child->priority;
+    memcpy(child->cwd, current->cwd, sizeof(current->cwd)); /* Наследуем текущую папку */
 
-    /* Обновляем счетчики открытых каналов при наследовании дескрипторов */
-    for (int fd = 3; fd < NR_OPEN; fd++) {
+    for (int fd = 0; fd < NR_OPEN; fd++) {
         if (child->filp[fd].in_use && child->filp[fd].type == FILE_TYPE_PIPE && child->filp[fd].pipe) {
             child->filp[fd].pipe->ref_count++;
             if (child->filp[fd].mode == 1) child->filp[fd].pipe->readers++;
@@ -53,7 +53,7 @@ int64_t sys_fork(struct trap_frame *tf)
     }
     memcpy((void *)child_user_stack_page, (void *)parent_user_stack_page, PAGE_SIZE);
 
-    child->user_stack_page = child_user_stack_page; /* Привязываем страницу для освобождения */
+    child->user_stack_page = child_user_stack_page;
 
     int64_t stack_offset = child_user_stack_page - parent_user_stack_page;
 
