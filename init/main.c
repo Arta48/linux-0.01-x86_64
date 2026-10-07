@@ -4,10 +4,10 @@
 #include <linux/sched.h>
 #include <linux/gdt.h>
 #include <linux/syscall.h>
+#include <linux/fs.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
-/* Медленный системный вызов через прерывание int 0x80 */
 static inline int64_t u_int80(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     int64_t ret;
@@ -20,7 +20,6 @@ static inline int64_t u_int80(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_
     return ret;
 }
 
-/* Быстрый аппаратный 64-битный системный вызов через инструкцию syscall */
 static inline int64_t u_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     int64_t ret;
@@ -33,7 +32,17 @@ static inline int64_t u_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint6
     return ret;
 }
 
-/* Обертки для шелла: используем быстрый syscall */
+/* Обертки системных вызовов VFS для User Space */
+static inline int64_t u_open(const char *path, int flags)
+{
+    return u_syscall(__NR_open, (uint64_t)path, flags, 0);
+}
+
+static inline int64_t u_close(int fd)
+{
+    return u_syscall(__NR_close, fd, 0, 0);
+}
+
 static inline int64_t u_read(int fd, char *buf, uint64_t count)
 {
     return u_syscall(__NR_read, fd, (uint64_t)buf, count);
@@ -56,7 +65,6 @@ static inline int64_t u_time(void)
 
 static inline int64_t u_fork(void)
 {
-    /* fork требует полный кадр trap_frame, поэтому вызывается через int 0x80 */
     return u_int80(__NR_fork, 0, 0, 0);
 }
 
@@ -65,12 +73,17 @@ static inline void u_ps(void)
     u_syscall(__NR_ps, 0, 0, 0);
 }
 
+static inline int64_t u_list(char *buf, uint64_t max_len)
+{
+    return u_syscall(__NR_list, (uint64_t)buf, max_len, 0);
+}
+
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* Строковые функции */
+/* Строковые вспомогательные функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -116,6 +129,7 @@ static int u_strncmp(const char *s1, const char *s2, uint64_t n)
     return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
+/* Парсер и обработчик команд */
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') {
@@ -124,28 +138,51 @@ static void execute_command(const char *cmd)
 
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
-        u_print("  help    - show this help message\n");
-        u_print("  bench   - benchmark 'int 0x80' vs 'syscall'\n");
-        u_print("  fork    - test sys_fork() child creation\n");
-        u_print("  ps      - show running processes\n");
-        u_print("  uptime  - show system uptime\n");
-        u_print("  getpid  - show current process ID\n");
-        u_print("  clear   - clear the console screen\n");
-        u_print("  echo .. - print arguments to console\n");
-        u_print("  exit    - terminate this shell process\n");
+        u_print("  help        - show this help message\n");
+        u_print("  ls          - list files in root RamFS\n");
+        u_print("  cat <file>  - display file contents\n");
+        u_print("  bench       - benchmark 'int 0x80' vs 'syscall'\n");
+        u_print("  fork        - test sys_fork() child creation\n");
+        u_print("  ps          - show running processes\n");
+        u_print("  uptime      - show system uptime\n");
+        u_print("  getpid      - show current process ID\n");
+        u_print("  clear       - clear the console screen\n");
+        u_print("  echo ..     - print arguments to console\n");
+        u_print("  exit        - terminate this shell process\n");
+    } else if (u_strcmp(cmd, "ls") == 0) {
+        char buf[512];
+        if (u_list(buf, sizeof(buf)) > 0) {
+            u_print(buf);
+        }
+    } else if (u_strncmp(cmd, "cat ", 4) == 0) {
+        const char *filename = cmd + 4;
+        while (*filename == ' ') filename++; /* Пропускаем лишние пробелы */
+
+            int64_t fd = u_open(filename, 0);
+        if (fd < 0) {
+            u_print("cat: file not found: ");
+            u_print(filename);
+            u_print("\n");
+        } else {
+            char fbuf[128];
+            int64_t n;
+            while ((n = u_read(fd, fbuf, sizeof(fbuf) - 1)) > 0) {
+                fbuf[n] = '\0';
+                u_write(1, fbuf, n);
+            }
+            u_close(fd);
+        }
     } else if (u_strcmp(cmd, "bench") == 0) {
         u_print("Running benchmark: 500,000 getpid() syscalls...\n");
 
-        /* 1. Замер int 0x80 */
         uint64_t start_int = (uint64_t)u_time();
         for (int i = 0; i < 500000; i++) {
             u_int80(__NR_getpid, 0, 0, 0);
         }
         uint64_t time_int = (uint64_t)u_time() - start_int;
 
-        /* 2. Замер аппаратного syscall */
         uint64_t start_fast = (uint64_t)u_time();
-        for (int i = 0; i < 50000; i++) {
+        for (int i = 0; i < 500000; i++) {
             u_syscall(__NR_getpid, 0, 0, 0);
         }
         uint64_t time_fast = (uint64_t)u_time() - start_fast;
@@ -269,6 +306,7 @@ void main(void)
     syscall_init();
     mem_init();
     sched_init();
+    fs_init();
 
     task_create(user_trampoline, 10);
 

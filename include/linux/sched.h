@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 
 #define NR_TASKS 64
 
@@ -13,15 +14,15 @@
 #define TASK_STOPPED         4
 
 struct task_struct {
-    uint64_t rsp;          /* Смещение 0: сохраненный указатель стека ядра */
-    uint64_t cr3;          /* Смещение 8: адрес PML4 таблицы страниц */
-    long state;            /* Состояние процесса */
-    long counter;          /* Оставшиеся тики текущего кванта времени */
-    long priority;         /* Базовый приоритет */
-    long pid;              /* Идентификатор процесса */
+    uint64_t rsp;          /* Смещение 0: стек ядра */
+    uint64_t cr3;          /* Смещение 8: CR3 */
+    long state;
+    long counter;
+    long priority;
+    long pid;
+    struct file filp[NR_OPEN]; /* Таблица открытых файлов процесса */
 };
 
-/* Как и в оригинальном Linux 0.01: стек и task_struct делят одну страницу памяти 4 КБ */
 union task_union {
     struct task_struct task;
     char stack[PAGE_SIZE];

@@ -2,6 +2,7 @@
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/keyboard.h>
+#include <linux/fs.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -20,31 +21,28 @@ static inline void wrmsr(uint32_t msr, uint64_t val)
 
 void syscall_init(void)
 {
-    /*
-     * STAR MSR:
-     * Биты 47:32 = 0x0008 (Kernel CS = 0x08, Kernel SS = 0x10)
-     * Биты 63:48 = 0x0010 (User SS = 0x18 | 3 = 0x1B, User CS = 0x20 | 3 = 0x23)
-     */
     uint64_t star = ((uint64_t)0x0010 << 48) | ((uint64_t)0x0008 << 32);
     wrmsr(MSR_STAR, star);
-
-    /* LSTAR MSR: адрес функции-обработчика syscall_entry */
     wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
-
-    /* SFMASK MSR: маскируем IF (бит 9, 0x200), запрещая прерывания при входе */
     wrmsr(MSR_SFMASK, 0x200);
 
     printk("[OK] Hardware 'syscall/sysret' MSRs Initialized\n");
 }
 
+/* sys_read: поддерживает как stdin (fd 0), так и файлы RamFS (fd >= 3) */
 static int64_t sys_read(int fd, char *buf, uint64_t count)
 {
-    if (fd != 0 || count == 0) {
-        return -1;
+    if (count == 0) return 0;
+
+    /* Чтение из обычного файла */
+    if (fd >= 3) {
+        return sys_file_read(fd, buf, count);
     }
 
-    uint64_t bytes_read = 0;
+    /* Чтение из stdin (fd == 0) */
+    if (fd != 0) return -1;
 
+    uint64_t bytes_read = 0;
     while (bytes_read < count) {
         __asm__ volatile ("sti");
 
@@ -111,10 +109,14 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
     switch (nr) {
         case __NR_fork:
             if (!tf) {
-                printk("[FORK] sys_fork requires trap_frame (called via int 0x80)\n");
+                printk("[FORK] requires trap_frame\n");
                 return -1;
             }
             return sys_fork(tf);
+        case __NR_open:
+            return sys_open((const char *)arg1, (int)arg2);
+        case __NR_close:
+            return sys_close((int)arg1);
         case __NR_read:
             return sys_read((int)arg1, (char *)arg2, arg3);
         case __NR_write:
@@ -126,6 +128,8 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_ps:
             sys_ps();
             return 0;
+        case __NR_list:
+            return sys_list((char *)arg1, arg2);
         case __NR_exit:
             return sys_exit((int)arg1);
         default:
