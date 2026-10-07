@@ -174,7 +174,7 @@ int64_t sys_open(const char *filename, int flags)
 
 int64_t sys_close(int fd)
 {
-    if (fd < 3 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
         return -1;
     }
 

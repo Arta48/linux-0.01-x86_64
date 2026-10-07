@@ -42,6 +42,11 @@ static inline int64_t u_close(int fd)
     return u_syscall(__NR_close, fd, 0, 0);
 }
 
+static inline int64_t u_dup2(int oldfd, int newfd)
+{
+    return u_syscall(__NR_dup2, oldfd, newfd, 0);
+}
+
 static inline int64_t u_unlink(const char *path)
 {
     return u_syscall(__NR_unlink, (uint64_t)path, 0, 0);
@@ -110,6 +115,70 @@ static inline int64_t u_list(char *buf, uint64_t max_len)
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
+}
+
+/* Аллокатор памяти malloc / free */
+struct block_header {
+    uint64_t size;
+    int is_free;
+    struct block_header *next;
+};
+
+static struct block_header *heap_head = NULL;
+
+static void *u_sbrk(int64_t increment)
+{
+    uint64_t cur_brk = (uint64_t)u_brk(0);
+    if (increment == 0) return (void *)cur_brk;
+    uint64_t new_brk = cur_brk + increment;
+    uint64_t res = (uint64_t)u_brk(new_brk);
+    if (res < new_brk) return (void *)-1;
+    return (void *)cur_brk;
+}
+
+static void *u_malloc(uint64_t size)
+{
+    if (size == 0) return NULL;
+    size = (size + 15) & ~15ULL;
+    struct block_header *curr = heap_head;
+    while (curr) {
+        if (curr->is_free && curr->size >= size) {
+            curr->is_free = 0;
+            return (void *)(curr + 1);
+        }
+        curr = curr->next;
+    }
+    uint64_t total_size = sizeof(struct block_header) + size;
+    void *raw = u_sbrk((int64_t)total_size);
+    if (raw == (void *)-1) return NULL;
+    struct block_header *new_block = (struct block_header *)raw;
+    new_block->size = size;
+    new_block->is_free = 0;
+    new_block->next = NULL;
+    if (!heap_head) {
+        heap_head = new_block;
+    } else {
+        curr = heap_head;
+        while (curr->next) curr = curr->next;
+        curr->next = new_block;
+    }
+    return (void *)(new_block + 1);
+}
+
+static void u_free(void *ptr)
+{
+    if (!ptr) return;
+    struct block_header *hdr = (struct block_header *)ptr - 1;
+    hdr->is_free = 1;
+    struct block_header *curr = heap_head;
+    while (curr && curr->next) {
+        if (curr->is_free && curr->next->is_free) {
+            curr->size += sizeof(struct block_header) + curr->next->size;
+            curr->next = curr->next->next;
+        } else {
+            curr = curr->next;
+        }
+    }
 }
 
 /* Строковые функции */
@@ -187,69 +256,140 @@ static int u_atoi(const char *s)
     return res;
 }
 
+static void execute_command(const char *cmd);
+
+/* Обработка конвейеров пайпов: cmd1 | cmd2 */
+static void execute_pipeline(const char *cmd, const char *pipe_pos)
+{
+    char left[64];
+    char right[64];
+
+    uint64_t l_len = pipe_pos - cmd;
+    if (l_len >= sizeof(left)) l_len = sizeof(left) - 1;
+    for (uint64_t i = 0; i < l_len; i++) left[i] = cmd[i];
+    while (l_len > 0 && (left[l_len - 1] == ' ' || left[l_len - 1] == '\t')) l_len--;
+    left[l_len] = '\0';
+
+    const char *r_ptr = pipe_pos + 1;
+    while (*r_ptr == ' ' || *r_ptr == '\t') r_ptr++;
+    uint64_t r_len = 0;
+    while (r_ptr[r_len] && r_len < sizeof(right) - 1) {
+        right[r_len] = r_ptr[r_len];
+        r_len++;
+    }
+    right[r_len] = '\0';
+
+    int p[2];
+    if (u_pipe(p) < 0) {
+        u_print("shell: pipe failed\n");
+        return;
+    }
+
+    int64_t pid1 = u_fork();
+    if (pid1 == 0) {
+        /* Ребенок 1: stdout перенаправлен в канал */
+        u_dup2(p[1], 1);
+        u_close(p[0]);
+        u_close(p[1]);
+        execute_command(left);
+        u_exit(0);
+    }
+
+    int64_t pid2 = u_fork();
+    if (pid2 == 0) {
+        /* Ребенок 2: stdin перенаправлен из канала */
+        u_dup2(p[0], 0);
+        u_close(p[0]);
+        u_close(p[1]);
+        execute_command(right);
+        u_exit(0);
+    }
+
+    /* Родитель закрывает свои дескрипторы канала и ждет обоих потомков */
+    u_close(p[0]);
+    u_close(p[1]);
+    int status;
+    u_waitpid(pid1, &status, 0);
+    u_waitpid(pid2, &status, 0);
+}
+
+/* Обработка универсального перенаправления: любая_команда > файл */
+static void execute_redirection(const char *cmd, const char *redir_pos)
+{
+    char left[64];
+    char fname[MAX_FILENAME];
+
+    uint64_t l_len = redir_pos - cmd;
+    if (l_len >= sizeof(left)) l_len = sizeof(left) - 1;
+    for (uint64_t i = 0; i < l_len; i++) left[i] = cmd[i];
+    while (l_len > 0 && (left[l_len - 1] == ' ' || left[l_len - 1] == '\t')) l_len--;
+    left[l_len] = '\0';
+
+    const char *r_ptr = redir_pos + 1;
+    while (*r_ptr == ' ' || *r_ptr == '\t') r_ptr++;
+    uint64_t r_len = 0;
+    while (r_ptr[r_len] && r_ptr[r_len] != ' ' && r_ptr[r_len] != '\t' && r_len < MAX_FILENAME - 1) {
+        fname[r_len] = r_ptr[r_len];
+        r_len++;
+    }
+    fname[r_len] = '\0';
+
+    int64_t pid = u_fork();
+    if (pid == 0) {
+        int64_t fd = u_open(fname, O_CREAT | O_WRONLY | O_TRUNC);
+        if (fd < 0) {
+            u_print("shell: cannot open target file: ");
+            u_print(fname);
+            u_print("\n");
+            u_exit(1);
+        }
+        /* Перенаправляем stdout (дескриптор 1) в файл */
+        u_dup2((int)fd, 1);
+        u_close((int)fd);
+
+        execute_command(left);
+        u_exit(0);
+    } else if (pid > 0) {
+        int status;
+        u_waitpid(pid, &status, 0);
+    }
+}
+
 static void execute_command(const char *cmd)
 {
-    if (cmd[0] == '\0') {
+    if (cmd[0] == '\0') return;
+
+    /* 1. Проверяем наличие пайпа: cmd1 | cmd2 */
+    const char *pipe_pos = cmd;
+    while (*pipe_pos && *pipe_pos != '|') pipe_pos++;
+    if (*pipe_pos == '|') {
+        execute_pipeline(cmd, pipe_pos);
         return;
     }
 
-    /* 1. Обработка перенаправления вывода: echo <текст> > <файл> */
-    const char *redir = cmd;
-    while (*redir && *redir != '>') redir++;
-
-    if (*redir == '>') {
-        char left[64];
-        char right[MAX_FILENAME];
-
-        uint64_t l_len = redir - cmd;
-        if (l_len >= sizeof(left)) l_len = sizeof(left) - 1;
-        for (uint64_t i = 0; i < l_len; i++) left[i] = cmd[i];
-        while (l_len > 0 && (left[l_len - 1] == ' ' || left[l_len - 1] == '\t')) l_len--;
-        left[l_len] = '\0';
-
-        const char *fname = redir + 1;
-        while (*fname == ' ' || *fname == '\t') fname++;
-        uint64_t r_len = 0;
-        while (fname[r_len] && fname[r_len] != ' ' && fname[r_len] != '\t' && r_len < MAX_FILENAME - 1) {
-            right[r_len] = fname[r_len];
-            r_len++;
-        }
-        right[r_len] = '\0';
-
-        const char *text = left;
-        if (u_strncmp(left, "echo ", 5) == 0) text = left + 5;
-
-        int64_t fd = u_open(right, O_CREAT | O_WRONLY | O_TRUNC);
-        if (fd < 0) {
-            u_print("shell: failed to redirect to file: ");
-            u_print(right);
-            u_print("\n");
-            return;
-        }
-
-        uint64_t tlen = 0;
-        while (text[tlen]) tlen++;
-        u_write(fd, text, tlen);
-        u_write(fd, "\n", 1);
-        u_close(fd);
+    /* 2. Проверяем универсальное перенаправление: cmd > file */
+    const char *redir_pos = cmd;
+    while (*redir_pos && *redir_pos != '>') redir_pos++;
+    if (*redir_pos == '>') {
+        execute_redirection(cmd, redir_pos);
         return;
     }
 
-    /* 2. Стандартные встроенные команды */
+    /* 3. Стандартные команды шелла */
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
-        u_print("  ls              - list files/binaries in RamFS\n");
-        u_print("  cat <file>      - display file contents\n");
+        u_print("  ls              - list files in RamFS\n");
+        u_print("  cat [file]      - display file contents (or stdin if empty)\n");
+        u_print("  cmd1 | cmd2     - execute Unix pipeline (e.g. ls | cat)\n");
+        u_print("  cmd > <file>    - redirect any command output to file\n");
         u_print("  touch <file>    - create an empty file\n");
         u_print("  rm <file>       - remove file (sys_unlink)\n");
-        u_print("  write <f> <txt> - write text to file\n");
-        u_print("  echo .. > <f>   - redirect output to file\n");
         u_print("  <binary>        - execute binary via fork() + execve()\n");
         u_print("  heap            - inspect process heap (brk / sbrk)\n");
-        u_print("  pipe            - test Unix IPC pipe\n");
-        u_print("  fork            - test fork and waitpid reaping\n");
-        u_print("  spawn / kill    - process management\n");
+        u_print("  malloc <sz>     - test heap memory allocation\n");
+        u_print("  ps              - show running processes\n");
+        u_print("  kill <pid>      - kill process by PID\n");
         u_print("  bench           - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  clear / exit    - terminal control\n");
     } else if (u_strcmp(cmd, "ls") == 0) {
@@ -262,7 +402,7 @@ static void execute_command(const char *cmd)
         while (*fname == ' ') fname++;
         int64_t fd = u_open(fname, O_CREAT | O_WRONLY);
         if (fd >= 0) {
-            u_close(fd);
+            u_close((int)fd);
         } else {
             u_print("touch: cannot create file: ");
             u_print(fname);
@@ -272,37 +412,21 @@ static void execute_command(const char *cmd)
         const char *fname = cmd + 3;
         while (*fname == ' ') fname++;
         if (u_unlink(fname) != 0) {
-            u_print("rm: cannot remove file (read-only or not found): ");
+            u_print("rm: cannot remove file: ");
             u_print(fname);
             u_print("\n");
         }
-    } else if (u_strncmp(cmd, "write ", 6) == 0) {
-        const char *rest = cmd + 6;
-        while (*rest == ' ') rest++;
-        char fname[MAX_FILENAME];
-        int fi = 0;
-        while (*rest && *rest != ' ' && fi < MAX_FILENAME - 1) {
-            fname[fi++] = *rest++;
-        }
-        fname[fi] = '\0';
-        while (*rest == ' ') rest++;
-
-        int64_t fd = u_open(fname, O_CREAT | O_WRONLY | O_TRUNC);
-        if (fd < 0) {
-            u_print("write: cannot open file: ");
-            u_print(fname);
-            u_print("\n");
-        } else {
-            uint64_t tlen = 0;
-            while (rest[tlen]) tlen++;
-            u_write(fd, rest, tlen);
-            u_write(fd, "\n", 1);
-            u_close(fd);
+    } else if (u_strcmp(cmd, "cat") == 0) {
+        /* cat без параметров читает из stdin (дескриптор 0) */
+        char fbuf[128];
+        int64_t n;
+        while ((n = u_read(0, fbuf, sizeof(fbuf) - 1)) > 0) {
+            fbuf[n] = '\0';
+            u_write(1, fbuf, n);
         }
     } else if (u_strncmp(cmd, "cat ", 4) == 0) {
         const char *filename = cmd + 4;
         while (*filename == ' ') filename++;
-
         int64_t fd = u_open(filename, O_RDONLY);
         if (fd < 0) {
             u_print("cat: file not found: ");
@@ -311,12 +435,15 @@ static void execute_command(const char *cmd)
         } else {
             char fbuf[128];
             int64_t n;
-            while ((n = u_read(fd, fbuf, sizeof(fbuf) - 1)) > 0) {
+            while ((n = u_read((int)fd, fbuf, sizeof(fbuf) - 1)) > 0) {
                 fbuf[n] = '\0';
                 u_write(1, fbuf, n);
             }
-            u_close(fd);
+            u_close((int)fd);
         }
+    } else if (u_strncmp(cmd, "echo ", 5) == 0) {
+        u_print(cmd + 5);
+        u_print("\n");
     } else if (u_strcmp(cmd, "heap") == 0) {
         uint64_t cur_brk = (uint64_t)u_brk(0);
         uint64_t heap_size = cur_brk - HEAP_START_VIRT;
@@ -327,23 +454,30 @@ static void execute_command(const char *cmd)
         u_print("\n  Heap Size   : ");
         u_print_num(heap_size);
         u_print(" bytes\n");
-    } else if (u_strcmp(cmd, "pipe") == 0) {
-        int pipefd[2];
-        if (u_pipe(pipefd) < 0) {
-            u_print("pipe: failed to create pipe!\n");
+    } else if (u_strncmp(cmd, "malloc ", 7) == 0) {
+        uint64_t sz = (uint64_t)u_atoi(cmd + 7);
+        if (sz == 0) {
+            u_print("malloc: size must be > 0\n");
             return;
         }
-
-        u_print("Created pipe: read_fd = ");
-        u_print_num(pipefd[0]);
-        u_print(", write_fd = ");
-        u_print_num(pipefd[1]);
-        u_print("\nForking child to test IPC communication...\n");
-
+        void *ptr = u_malloc(sz);
+        if (!ptr) {
+            u_print("malloc: out of memory!\n");
+        } else {
+            u_print("Allocated ");
+            u_print_num(sz);
+            u_print(" bytes at address: ");
+            u_print_hex((uint64_t)ptr);
+            u_print("\nFreeing block...\n");
+            u_free(ptr);
+        }
+    } else if (u_strcmp(cmd, "pipe") == 0) {
+        int pipefd[2];
+        if (u_pipe(pipefd) < 0) return;
         int64_t pid = u_fork();
         if (pid == 0) {
             u_close(pipefd[0]);
-            const char msg[] = ">>> [PIPE IPC] Secret message transmitted from Child to Parent through Pipe!\n";
+            const char msg[] = ">>> [PIPE IPC] Secret message transmitted through Pipe!\n";
             u_write(pipefd[1], msg, sizeof(msg) - 1);
             u_close(pipefd[1]);
             u_exit(0);
@@ -353,129 +487,55 @@ static void execute_command(const char *cmd)
             int64_t n = u_read(pipefd[0], pbuf, sizeof(pbuf) - 1);
             if (n > 0) {
                 pbuf[n] = '\0';
-                u_print("Parent received via Pipe:\n");
+                u_print("Parent received: ");
                 u_print(pbuf);
             }
             u_close(pipefd[0]);
-
             int status = 0;
             u_waitpid(pid, &status, 0);
-            u_print("[Parent] Reaped child PID ");
-            u_print_num(pid);
-            u_print(" successfully (status = ");
-            u_print_num(status);
-            u_print(")\n");
         }
     } else if (u_strcmp(cmd, "fork") == 0) {
         int64_t pid = u_fork();
-
-        if (pid < 0) {
-            u_print("fork: failed to clone process!\n");
-        } else if (pid == 0) {
-            u_print("\n>>> [CHILD] Process successfully spawned! PID = ");
-            u_print_num(u_getpid());
-            u_print("\n>>> [CHILD] Simulating work for 2 seconds...\n");
-
-            uint64_t start = (uint64_t)u_time();
-            while ((uint64_t)u_time() - start < 200) {}
-
-            u_print(">>> [CHILD] Work finished. Calling sys_exit(0)...\n");
+        if (pid == 0) {
+            u_print("Child process working...\n");
             u_exit(0);
-        } else {
-            u_print("Parent spawned child with PID = ");
-            u_print_num(pid);
-            u_print(". Waiting for child to finish...\n");
-
+        } else if (pid > 0) {
             int status = 0;
             u_waitpid(pid, &status, 0);
-            u_print("[Parent] Child finished and reaped! Status = ");
-            u_print_num(status);
-            u_print("\n");
+            u_print("Child finished and reaped.\n");
         }
-    } else if (u_strcmp(cmd, "spawn") == 0) {
-        int64_t pid = u_fork();
-        if (pid == 0) {
-            while (1) {
-                for (volatile int i = 0; i < 50000000; i++) {}
-            }
-        } else if (pid > 0) {
-            u_print("Spawned background infinite process with PID = ");
-            u_print_num(pid);
-            u_print(". Type 'ps' or 'kill <pid>'\n");
-        }
-    } else if (u_strncmp(cmd, "kill ", 5) == 0) {
-        int target_pid = u_atoi(cmd + 5);
-        if (target_pid <= 1) {
-            u_print("kill: cannot kill system processes!\n");
-        } else {
-            if (u_kill(target_pid, 9) == 0) {
-                u_print("Killed process ");
-                u_print_num(target_pid);
-                u_print("\n");
-            } else {
-                u_print("kill: process not found or already dead\n");
-            }
-        }
-    } else if (u_strcmp(cmd, "wait") == 0) {
-        int status = 0;
-        int64_t reaped = u_waitpid(-1, &status, 0);
-        if (reaped > 0) {
-            u_print("Reaped zombie process PID = ");
-            u_print_num(reaped);
-            u_print(" (status = ");
-            u_print_num(status);
-            u_print(")\n");
-        } else {
-            u_print("wait: no zombie children to reap\n");
-        }
-    } else if (u_strcmp(cmd, "bench") == 0) {
-        u_print("Running benchmark: 500,000 getpid() syscalls...\n");
-
-        uint64_t start_int = (uint64_t)u_time();
-        for (int i = 0; i < 500000; i++) {
-            u_int80(__NR_getpid, 0, 0, 0);
-        }
-        uint64_t time_int = (uint64_t)u_time() - start_int;
-
-        uint64_t start_fast = (uint64_t)u_time();
-        for (int i = 0; i < 500000; i++) {
-            u_syscall(__NR_getpid, 0, 0, 0);
-        }
-        uint64_t time_fast = (uint64_t)u_time() - start_fast;
-
-        u_print("Results:\n  Legacy 'int 0x80' : ");
-        u_print_num(time_int);
-        u_print(" jiffies\n  Fast   'syscall'  : ");
-        u_print_num(time_fast);
-        u_print(" jiffies\n");
     } else if (u_strcmp(cmd, "ps") == 0) {
         u_ps();
+    } else if (u_strncmp(cmd, "kill ", 5) == 0) {
+        int target_pid = u_atoi(cmd + 5);
+        if (target_pid > 1) u_kill(target_pid, 9);
     } else if (u_strcmp(cmd, "uptime") == 0) {
         uint64_t ticks = (uint64_t)u_time();
-        uint64_t sec = ticks / 100;
         u_print("Uptime: ");
-        u_print_num(sec);
-        u_print(" seconds (");
-        u_print_num(ticks);
-        u_print(" jiffies)\n");
+        u_print_num(ticks / 100);
+        u_print(" seconds\n");
     } else if (u_strcmp(cmd, "getpid") == 0) {
-        u_print("Current Process PID: ");
+        u_print("Current PID: ");
         u_print_num((uint64_t)u_getpid());
         u_print("\n");
     } else if (u_strcmp(cmd, "clear") == 0) {
         u_print("\f");
-    } else if (u_strncmp(cmd, "echo ", 5) == 0) {
-        u_print(cmd + 5);
-        u_print("\n");
+    } else if (u_strcmp(cmd, "bench") == 0) {
+        u_print("Benchmarking 500,000 getpid()...\n");
+        uint64_t s_int = (uint64_t)u_time();
+        for (int i = 0; i < 500000; i++) u_int80(__NR_getpid, 0, 0, 0);
+        uint64_t t_int = (uint64_t)u_time() - s_int;
+        uint64_t s_fast = (uint64_t)u_time();
+        for (int i = 0; i < 500000; i++) u_syscall(__NR_getpid, 0, 0, 0);
+        uint64_t t_fast = (uint64_t)u_time() - s_fast;
+        u_print("int 0x80: "); u_print_num(t_int); u_print(" jiffies\n");
+        u_print("syscall : "); u_print_num(t_fast); u_print(" jiffies\n");
     } else if (u_strcmp(cmd, "exit") == 0) {
-        u_print("Exiting shell...\n");
         u_exit(0);
     } else {
-        /* Внешняя бинарная программа: fork + execve */
+        /* Внешняя бинарная программа через fork + execve */
         int64_t pid = u_fork();
-        if (pid < 0) {
-            u_print("shell: fork failed\n");
-        } else if (pid == 0) {
+        if (pid == 0) {
             int64_t err = u_execve(cmd, NULL, NULL);
             if (err < 0) {
                 u_print("shell: command or binary not found: ");
@@ -483,7 +543,7 @@ static void execute_command(const char *cmd)
                 u_print("\n");
                 u_exit(127);
             }
-        } else {
+        } else if (pid > 0) {
             int status = 0;
             u_waitpid(pid, &status, 0);
             u_print("[Program finished with exit code ");
