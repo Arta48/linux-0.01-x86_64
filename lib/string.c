@@ -26,6 +26,21 @@ void *memset(void *dest, int c, uint64_t n)
     return dest;
 }
 
+int memcmp(const void *s1, const void *s2, uint64_t n)
+{
+    const unsigned char *p1 = (const unsigned char *)s1;
+    const unsigned char *p2 = (const unsigned char *)s2;
+
+    while (n--) {
+        if (*p1 != *p2) {
+            return (int)(*p1 - *p2);
+        }
+        p1++;
+        p2++;
+    }
+    return 0;
+}
+
 int strcmp(const char *s1, const char *s2)
 {
     while (*s1 && (*s1 == *s2)) {

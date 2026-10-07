@@ -131,18 +131,74 @@ static int64_t sys_getuid(void)
     return (int64_t)current->uid;
 }
 
-static int64_t sys_setuid(uint16_t uid)
+/* sys_setuid: проверяет пароль в /etc/passwd перед сменой пользователя */
+static int64_t sys_setuid(uint16_t uid, const char *password)
 {
-    /* Только root (euid == 0) может менять UID */
+    /* Суперпользователь root (euid == 0) может переключаться без пароля */
     if (current->euid == 0) {
         current->uid = uid;
         current->euid = uid;
         return 0;
     }
+
+    /* Обычный пользователь переключается сам на себя */
     if (uid == current->uid) {
         return 0;
     }
-    return -1; /* Permission denied */
+
+    /* Если передан пароль, проверяем его в /etc/passwd */
+    if (!password) {
+        return -1; /* Permission denied */
+    }
+
+    uint64_t fsz = 0;
+    const char *data = fs_get_file_data("/etc/passwd", &fsz);
+    if (!data || fsz == 0) return -1;
+
+    /* Парсим записи формата: user:pass:uid:... */
+    const char *p = data;
+    while (*p && (uint64_t)(p - data) < fsz) {
+        const char *line_start = p;
+        while (*p && *p != '\n') p++;
+
+        /* Ищем первое двоеточие (после имени) */
+        const char *c1 = line_start;
+        while (c1 < p && *c1 != ':') c1++;
+
+        /* Ищем второе двоеточие (после пароля) */
+        const char *c2 = c1 + 1;
+        while (c2 < p && *c2 != ':') c2++;
+
+        /* Ищем третье двоеточие (после UID) */
+        const char *c3 = c2 + 1;
+        while (c3 < p && *c3 != ':') c3++;
+
+        if (c1 < p && c2 < p && c3 < p) {
+            /* Считываем UID */
+            uint16_t entry_uid = 0;
+            const char *uptr = c2 + 1;
+            while (uptr < c3) {
+                if (*uptr >= '0' && *uptr <= '9') {
+                    entry_uid = entry_uid * 10 + (*uptr - '0');
+                }
+                uptr++;
+            }
+
+            if (entry_uid == uid) {
+                /* Сверяем пароль */
+                uint64_t pass_len = c2 - (c1 + 1);
+                if (strlen(password) == pass_len && memcmp(password, c1 + 1, pass_len) == 0) {
+                    current->uid = uid;
+                    current->euid = uid;
+                    return 0; /* Аутентификация успешна! */
+                }
+            }
+        }
+
+        if (*p == '\n') p++;
+    }
+
+    return -1; /* Неверный пароль */
 }
 
 static int64_t sys_time(void)
@@ -409,7 +465,8 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             ret = sys_getuid();
             break;
         case __NR_setuid:
-            ret = sys_setuid((uint16_t)arg1);
+            /* arg1 = uid, arg2 = password */
+            ret = sys_setuid((uint16_t)arg1, (const char *)arg2);
             break;
         case __NR_time:
             ret = sys_time();

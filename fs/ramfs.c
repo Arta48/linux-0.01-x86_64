@@ -233,7 +233,7 @@ void fs_init(void)
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
         "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
-        "root:x:0:0:Superuser:/root\nuser:x:1000:1000:Regular User:/home\nguest:x:1001:1001:Guest Account:/home\n",
+        "root:root:0:0:Superuser:/root\nuser:user:1000:1000:Regular User:/home\nguest:guest:1001:1001:Guest Account:/home\n",
         (const char *)bin_hello,
         (const char *)bin_calc
     };

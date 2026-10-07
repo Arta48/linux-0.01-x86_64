@@ -105,9 +105,9 @@ static inline int64_t u_getuid(void)
     return u_syscall(__NR_getuid, 0, 0, 0);
 }
 
-static inline int64_t u_setuid(uint16_t uid)
+static inline int64_t u_setuid(uint16_t uid, const char *password)
 {
-    return u_syscall(__NR_setuid, (uint64_t)uid, 0, 0);
+    return u_syscall(__NR_setuid, (uint64_t)uid, (uint64_t)password, 0);
 }
 
 static inline int64_t u_time(void)
@@ -173,71 +173,7 @@ static inline void u_exit(int status)
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* Аллокатор памяти malloc / free */
-struct block_header {
-    uint64_t size;
-    int is_free;
-    struct block_header *next;
-};
-
-static struct block_header *heap_head = NULL;
-
-static void *u_sbrk(int64_t increment)
-{
-    uint64_t cur_brk = (uint64_t)u_brk(0);
-    if (increment == 0) return (void *)cur_brk;
-    uint64_t new_brk = cur_brk + increment;
-    uint64_t res = (uint64_t)u_brk(new_brk);
-    if (res < new_brk) return (void *)-1;
-    return (void *)cur_brk;
-}
-
-static void *u_malloc(uint64_t size)
-{
-    if (size == 0) return NULL;
-    size = (size + 15) & ~15ULL;
-    struct block_header *curr = heap_head;
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            curr->is_free = 0;
-            return (void *)(curr + 1);
-        }
-        curr = curr->next;
-    }
-    uint64_t total_size = sizeof(struct block_header) + size;
-    void *raw = u_sbrk((int64_t)total_size);
-    if (raw == (void *)-1) return NULL;
-    struct block_header *new_block = (struct block_header *)raw;
-    new_block->size = size;
-    new_block->is_free = 0;
-    new_block->next = NULL;
-    if (!heap_head) {
-        heap_head = new_block;
-    } else {
-        curr = heap_head;
-        while (curr->next) curr = curr->next;
-        curr->next = new_block;
-    }
-    return (void *)(new_block + 1);
-}
-
-static void u_free(void *ptr)
-{
-    if (!ptr) return;
-    struct block_header *hdr = (struct block_header *)ptr - 1;
-    hdr->is_free = 1;
-    struct block_header *curr = heap_head;
-    while (curr && curr->next) {
-        if (curr->is_free && curr->next->is_free) {
-            curr->size += sizeof(struct block_header) + curr->next->size;
-            curr->next = curr->next->next;
-        } else {
-            curr = curr->next;
-        }
-    }
-}
-
-/* Строковые вспомогательные функции */
+/* Строковые функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -258,25 +194,6 @@ static void u_print_num(uint64_t n)
         buf[i++] = digits[n % 10];
         n /= 10;
     }
-    while (--i >= 0) {
-        u_write(1, &buf[i], 1);
-    }
-}
-
-static void u_print_hex(uint64_t n)
-{
-    char buf[32];
-    char digits[] = "0123456789ABCDEF";
-    int i = 0;
-    if (n == 0) {
-        u_print("0x0");
-        return;
-    }
-    while (n > 0) {
-        buf[i++] = digits[n % 16];
-        n /= 16;
-    }
-    u_print("0x");
     while (--i >= 0) {
         u_write(1, &buf[i], 1);
     }
@@ -693,6 +610,25 @@ static void do_wc(int fd, int only_lines)
     }
 }
 
+/* Безопасное чтение пароля без эха */
+static void read_password(char *out, int max_len)
+{
+    int pi = 0;
+    char c;
+    while (u_read(0, &c, 1) > 0) {
+        if (c == '\n') {
+            break;
+        }
+        if (c == '\b') {
+            if (pi > 0) pi--;
+        } else if (c >= 32 && c <= 126 && pi < max_len - 1) {
+            out[pi++] = c;
+        }
+    }
+    out[pi] = '\0';
+    u_print("\n");
+}
+
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') return;
@@ -740,7 +676,7 @@ static void execute_command(const char *cmd)
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
         u_print("  whoami / id     - print current user / group info\n");
-        u_print("  su [user]       - switch user (su root, su user)\n");
+        u_print("  su [user]       - switch user (with password check!)\n");
         u_print("  chmod <mod> <f> - change file permissions\n");
         u_print("  echo $VAR       - variable expansion ($?, $PWD, $USER)\n");
         u_print("  export K=V / env- environment variables management\n");
@@ -754,8 +690,6 @@ static void execute_command(const char *cmd)
         u_print("  mkdir / rmdir   - directory management\n");
         u_print("  cat / touch / rm- file management\n");
         u_print("  <binary>        - execute binary via fork() + execve()\n");
-        u_print("  heap / malloc   - dynamic memory management\n");
-        u_print("  malloctest      - stress test malloc() and free()\n");
         u_print("  sigtest         - test Ring 3 custom SIGINT handler\n");
         u_print("  date / sleep    - system time & sleeping\n");
         u_print("  ps / kill / wait- process management\n");
@@ -781,23 +715,41 @@ static void execute_command(const char *cmd)
         const char *user = exec_cmd + 2;
         while (*user == ' ') user++;
         uint16_t target_uid = 0;
+        const char *uname = "root";
+
         if (user[0] == '\0' || u_strcmp(user, "root") == 0) {
             target_uid = 0;
+            uname = "root";
         } else if (u_strcmp(user, "user") == 0) {
             target_uid = 1000;
+            uname = "user";
         } else if (u_strcmp(user, "guest") == 0) {
             target_uid = 1001;
+            uname = "guest";
         } else {
             target_uid = (uint16_t)u_atoi(user);
         }
 
-        if (u_setuid(target_uid) == 0) {
-            if (target_uid == 0) env_set("USER", "root");
-            else if (target_uid == 1000) env_set("USER", "user");
-            else if (target_uid == 1001) env_set("USER", "guest");
+        uint16_t cur_uid = (uint16_t)u_getuid();
+
+        /* Если мы root - переключаемся сразу */
+        if (cur_uid == 0) {
+            u_setuid(target_uid, NULL);
+            env_set("USER", uname);
+            last_exit_code = 0;
+            return;
+        }
+
+        /* Если мы обычный пользователь - запрашиваем пароль! */
+        u_print("Password: ");
+        char pass_buf[32];
+        read_password(pass_buf, sizeof(pass_buf));
+
+        if (u_setuid(target_uid, pass_buf) == 0) {
+            env_set("USER", uname);
             last_exit_code = 0;
         } else {
-            u_print("su: permission denied\n");
+            u_print("su: Authentication failure\n");
             last_exit_code = 1;
         }
     } else if (u_strncmp(exec_cmd, "chmod ", 6) == 0) {
@@ -810,43 +762,6 @@ static void execute_command(const char *cmd)
             u_print("chmod: permission denied or file not found\n");
             last_exit_code = 1;
         } else last_exit_code = 0;
-    } else if (u_strcmp(exec_cmd, "heap") == 0) {
-        uint64_t cur_brk = (uint64_t)u_brk(0);
-        uint64_t heap_size = cur_brk - HEAP_START_VIRT;
-        u_print("Process Heap Info:\n  Start Break : ");
-        u_print_hex(HEAP_START_VIRT);
-        u_print("\n  Current Break: ");
-        u_print_hex(cur_brk);
-        u_print("\n  Heap Size   : ");
-        u_print_num(heap_size);
-        u_print(" bytes\n");
-        last_exit_code = 0;
-    } else if (u_strncmp(exec_cmd, "malloc ", 7) == 0) {
-        uint64_t sz = (uint64_t)u_atoi(exec_cmd + 7);
-        if (sz == 0) return;
-        void *ptr = u_malloc(sz);
-        if (!ptr) {
-            u_print("malloc: out of memory!\n");
-        } else {
-            u_print("Allocated "); u_print_num(sz); u_print(" bytes at: ");
-            u_print_hex((uint64_t)ptr); u_print("\nFreeing block...\n");
-            u_free(ptr);
-        }
-        last_exit_code = 0;
-    } else if (u_strcmp(exec_cmd, "malloctest") == 0) {
-        u_print("--- Running malloc / free Stress Test ---\n");
-        char *b1 = (char *)u_malloc(64);
-        char *b2 = (char *)u_malloc(256);
-        char *b3 = (char *)u_malloc(1024);
-        u_free(b2);
-        char *b4 = (char *)u_malloc(128);
-        if (b4 == b2) u_print("1. Reused freed block: SUCCESS\n");
-        u_free(b1); u_free(b4); u_free(b3);
-        char *b5 = (char *)u_malloc(2048);
-        if (b5 == b1) u_print("2. Coalesced block reuse: SUCCESS\n");
-        u_free(b5);
-        u_print("--- Malloc Test Passed 100%! ---\n");
-        last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "sigtest") == 0) {
         int64_t pid = u_fork();
         if (pid == 0) {
@@ -1088,14 +1003,14 @@ static void print_prompt(void)
     if (uid == 0) {
         u_print("root@linux64:");
         u_print(cwd);
-        u_print("# "); /* Решётка для root */
+        u_print("# ");
     } else {
         const char *user = env_get("USER");
         if (user) u_print(user);
         else u_print("user");
         u_print("@linux64:");
         u_print(cwd);
-        u_print("$ "); /* Доллар для обычных пользователей */
+        u_print("$ ");
     }
 }
 
