@@ -35,7 +35,13 @@ int64_t sys_fork(struct trap_frame *tf)
     child->exit_code = 0;
     child->state = TASK_RUNNING;
     child->counter = child->priority;
-    memcpy(child->cwd, current->cwd, sizeof(current->cwd)); /* Наследуем текущую папку */
+    child->signal = 0; /* Очищаем ожидающие сигналы */
+    child->alarm = 0;
+    memcpy(child->cwd, current->cwd, sizeof(current->cwd));
+
+    for (int s = 0; s < 32; s++) {
+        child->sig_fn[s] = current->sig_fn[s];
+    }
 
     for (int fd = 0; fd < NR_OPEN; fd++) {
         if (child->filp[fd].in_use && child->filp[fd].type == FILE_TYPE_PIPE && child->filp[fd].pipe) {

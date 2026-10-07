@@ -65,7 +65,7 @@ Image: $(OBJS)
 	$(LD) $(LDFLAGS) -o Image $(OBJS)
 
 run: Image
-	qemu-system-x86_64 -m 128M -kernel Image -serial stdio
+	qemu-system-x86_64 -m 128M -kernel Image -serial mon:stdio
 
 clean:
 	rm -f $(OBJS) Image

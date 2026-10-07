@@ -3,6 +3,7 @@
 #include <linux/sched.h>
 #include <linux/syscall.h>
 #include <linux/keyboard.h>
+#include <linux/signal.h>
 #include <asm/io.h>
 
 #define PIC1_CMD  0x20
@@ -52,7 +53,6 @@ static void pic_remap(void)
     outb(0x01, PIC1_DATA);
     outb(0x01, PIC2_DATA);
 
-    /* Размаскируем IRQ0 (бит 0) и IRQ1 (бит 1) -> 0xFC (11111100b) */
     outb(0xFC, PIC1_DATA);
     outb(0xFF, PIC2_DATA);
 }
@@ -84,13 +84,8 @@ void trap_init(void)
     set_idt_gate(16, (uint64_t)isr16, 0);  set_idt_gate(17, (uint64_t)isr17, 0);
     set_idt_gate(18, (uint64_t)isr18, 0);  set_idt_gate(19, (uint64_t)isr19, 0);
 
-    /* IRQ0 (Таймер) */
     set_idt_gate(32, (uint64_t)isr32, 0);
-
-    /* IRQ1 (Клавиатура) */
     set_idt_gate(33, (uint64_t)isr33, 0);
-
-    /* Системные вызовы int 0x80 (DPL = 3) */
     set_idt_gate(128, (uint64_t)isr128, 3);
 
     pic_remap();
@@ -110,18 +105,35 @@ static const char *exceptions[] = {
 
 void isr_handler(struct trap_frame *tf)
 {
-    /* Системный вызов int 0x80 */
     if (tf->int_no == 128) {
         tf->rax = syscall_dispatcher(tf->rax, tf->rbx, tf->rcx, tf->rdx, tf);
         return;
     }
 
-    /* Аппаратные прерывания IRQ (32..47) */
     if (tf->int_no >= 32 && tf->int_no < 48) {
         if (tf->int_no == 32) {
             jiffies++;
+            check_serial_events(); /* Асинхронный опрос терминала каждые 10 мс */
             outb(0x20, 0x20);
             do_timer();
+
+            /* Доставка сигналов при возврате в Ring 3 */
+            if ((tf->cs & 3) == 3 && current && current->signal) {
+                for (int sig = 1; sig < 32; sig++) {
+                    if (current->signal & (1U << sig)) {
+                        current->signal &= ~(1U << sig);
+                        if (current->sig_fn[sig] == (uint64_t)SIG_IGN) continue;
+                        if (current->sig_fn[sig] == (uint64_t)SIG_DFL) {
+                            sys_exit(128 + sig);
+                        } else {
+                            /* Сохраняем старый RIP на стек пользователя для ret */
+                            tf->rsp -= 8;
+                            *(uint64_t *)tf->rsp = tf->rip;
+                            tf->rip = current->sig_fn[sig];
+                        }
+                    }
+                }
+            }
             return;
         }
         if (tf->int_no == 33) {
@@ -136,7 +148,6 @@ void isr_handler(struct trap_frame *tf)
         return;
     }
 
-    /* Исключения процессора */
     __asm__ volatile ("cli");
 
     if (tf->int_no < 20) {

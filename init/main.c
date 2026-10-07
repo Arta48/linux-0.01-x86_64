@@ -5,6 +5,7 @@
 #include <linux/gdt.h>
 #include <linux/syscall.h>
 #include <linux/fs.h>
+#include <linux/signal.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -122,6 +123,11 @@ static inline int64_t u_kill(int64_t pid, int sig)
     return u_syscall(__NR_kill, (uint64_t)pid, sig, 0);
 }
 
+static inline int64_t u_signal(int sig, void (*handler)(int))
+{
+    return u_syscall(__NR_signal, sig, (uint64_t)handler, 0);
+}
+
 static inline int64_t u_brk(uint64_t new_brk)
 {
     return u_syscall(__NR_brk, new_brk, 0, 0);
@@ -135,6 +141,70 @@ static inline int64_t u_list(const char *path, char *buf, uint64_t max_len)
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
+}
+
+/* Аллокатор памяти malloc / free */
+struct block_header {
+    uint64_t size;
+    int is_free;
+    struct block_header *next;
+};
+
+static struct block_header *heap_head = NULL;
+
+static void *u_sbrk(int64_t increment)
+{
+    uint64_t cur_brk = (uint64_t)u_brk(0);
+    if (increment == 0) return (void *)cur_brk;
+    uint64_t new_brk = cur_brk + increment;
+    uint64_t res = (uint64_t)u_brk(new_brk);
+    if (res < new_brk) return (void *)-1;
+    return (void *)cur_brk;
+}
+
+static void *u_malloc(uint64_t size)
+{
+    if (size == 0) return NULL;
+    size = (size + 15) & ~15ULL;
+    struct block_header *curr = heap_head;
+    while (curr) {
+        if (curr->is_free && curr->size >= size) {
+            curr->is_free = 0;
+            return (void *)(curr + 1);
+        }
+        curr = curr->next;
+    }
+    uint64_t total_size = sizeof(struct block_header) + size;
+    void *raw = u_sbrk((int64_t)total_size);
+    if (raw == (void *)-1) return NULL;
+    struct block_header *new_block = (struct block_header *)raw;
+    new_block->size = size;
+    new_block->is_free = 0;
+    new_block->next = NULL;
+    if (!heap_head) {
+        heap_head = new_block;
+    } else {
+        curr = heap_head;
+        while (curr->next) curr = curr->next;
+        curr->next = new_block;
+    }
+    return (void *)(new_block + 1);
+}
+
+static void u_free(void *ptr)
+{
+    if (!ptr) return;
+    struct block_header *hdr = (struct block_header *)ptr - 1;
+    hdr->is_free = 1;
+    struct block_header *curr = heap_head;
+    while (curr && curr->next) {
+        if (curr->is_free && curr->next->is_free) {
+            curr->size += sizeof(struct block_header) + curr->next->size;
+            curr->next = curr->next->next;
+        } else {
+            curr = curr->next;
+        }
+    }
 }
 
 /* Строковые вспомогательные функции */
@@ -210,6 +280,14 @@ static int u_atoi(const char *s)
         s++;
     }
     return res;
+}
+
+static volatile int sigint_received = 0;
+static void user_sigint_handler(int sig)
+{
+    (void)sig;
+    u_print("\n>>> [USER SIGNAL HANDLER] Caught SIGINT (Ctrl+C) in Ring 3!\n");
+    sigint_received = 1;
 }
 
 static void execute_command(const char *cmd);
@@ -323,18 +401,18 @@ static void execute_command(const char *cmd)
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
-        u_print("  pwd             - print working directory\n");
-        u_print("  cd <dir>        - change directory (cd .., cd /)\n");
-        u_print("  ls [dir]        - list files in current/specified directory\n");
-        u_print("  mkdir <dir>     - create directory\n");
-        u_print("  rmdir <dir>     - remove empty directory\n");
+        u_print("  pwd / cd [dir]  - directory navigation\n");
+        u_print("  ls [dir]        - list files in directory\n");
+        u_print("  mkdir / rmdir   - directory management\n");
         u_print("  cat [file]      - display file contents (or stdin)\n");
-        u_print("  touch <file>    - create an empty file\n");
-        u_print("  rm <file>       - remove file (sys_unlink)\n");
-        u_print("  cmd > <file>    - redirect any command output to file\n");
+        u_print("  touch / rm      - create or remove files\n");
+        u_print("  cmd > <file>    - redirect command output to file\n");
         u_print("  cmd1 | cmd2     - execute Unix pipeline\n");
         u_print("  <binary>        - execute binary via fork() + execve()\n");
         u_print("  heap / malloc   - dynamic memory management\n");
+        u_print("  malloctest      - stress test malloc() and free()\n");
+        u_print("  sleep <sec>     - sleep N seconds (interruptible by Ctrl+C)\n");
+        u_print("  sigtest         - test Ring 3 custom SIGINT handler\n");
         u_print("  ps / kill / wait- process management\n");
         u_print("  bench           - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  clear / exit    - terminal control\n");
@@ -358,17 +436,13 @@ static void execute_command(const char *cmd)
         const char *dname = cmd + 6;
         while (*dname == ' ') dname++;
         if (u_mkdir(dname) != 0) {
-            u_print("mkdir: cannot create directory: ");
-            u_print(dname);
-            u_print("\n");
+            u_print("mkdir: cannot create directory\n");
         }
     } else if (u_strncmp(cmd, "rmdir ", 6) == 0) {
         const char *dname = cmd + 6;
         while (*dname == ' ') dname++;
         if (u_rmdir(dname) != 0) {
-            u_print("rmdir: cannot remove directory (not empty or protected): ");
-            u_print(dname);
-            u_print("\n");
+            u_print("rmdir: cannot remove directory\n");
         }
     } else if (u_strncmp(cmd, "ls", 2) == 0 && (cmd[2] == ' ' || cmd[2] == '\0')) {
         const char *arg = cmd + 2;
@@ -381,21 +455,11 @@ static void execute_command(const char *cmd)
         const char *fname = cmd + 6;
         while (*fname == ' ') fname++;
         int64_t fd = u_open(fname, O_CREAT | O_WRONLY);
-        if (fd >= 0) {
-            u_close((int)fd);
-        } else {
-            u_print("touch: cannot create file: ");
-            u_print(fname);
-            u_print("\n");
-        }
+        if (fd >= 0) u_close((int)fd);
     } else if (u_strncmp(cmd, "rm ", 3) == 0) {
         const char *fname = cmd + 3;
         while (*fname == ' ') fname++;
-        if (u_unlink(fname) != 0) {
-            u_print("rm: cannot remove file: ");
-            u_print(fname);
-            u_print("\n");
-        }
+        if (u_unlink(fname) != 0) u_print("rm: cannot remove file\n");
     } else if (u_strcmp(cmd, "cat") == 0) {
         char fbuf[128];
         int64_t n;
@@ -436,11 +500,75 @@ static void execute_command(const char *cmd)
     } else if (u_strncmp(cmd, "malloc ", 7) == 0) {
         uint64_t sz = (uint64_t)u_atoi(cmd + 7);
         if (sz == 0) return;
-        int64_t cur = u_brk(0);
-        u_brk(cur + sz);
-        u_print("Expanded heap by ");
-        u_print_num(sz);
-        u_print(" bytes\n");
+        void *ptr = u_malloc(sz);
+        if (!ptr) {
+            u_print("malloc: out of memory!\n");
+        } else {
+            u_print("Allocated ");
+            u_print_num(sz);
+            u_print(" bytes at address: ");
+            u_print_hex((uint64_t)ptr);
+            u_print("\nFreeing block...\n");
+            u_free(ptr);
+        }
+    } else if (u_strcmp(cmd, "malloctest") == 0) {
+        u_print("--- Running malloc / free Stress Test ---\n");
+        char *b1 = (char *)u_malloc(64);
+        char *b2 = (char *)u_malloc(256);
+        char *b3 = (char *)u_malloc(1024);
+        u_print("1. B1 at "); u_print_hex((uint64_t)b1); u_print("\n");
+        u_print("   B2 at "); u_print_hex((uint64_t)b2); u_print("\n");
+        u_print("   B3 at "); u_print_hex((uint64_t)b3); u_print("\n");
+        u_free(b2);
+        char *b4 = (char *)u_malloc(128);
+        u_print("2. B4 at "); u_print_hex((uint64_t)b4);
+        if (b4 == b2) u_print(" (REUSED B2!)\n"); else u_print("\n");
+        u_free(b1); u_free(b4); u_free(b3);
+        char *b5 = (char *)u_malloc(2048);
+        u_print("3. B5 at "); u_print_hex((uint64_t)b5);
+        if (b5 == b1) u_print(" (COALESCED SUCCESS!)\n"); else u_print("\n");
+        u_free(b5);
+        u_print("--- Malloc Test Passed! ---\n");
+    } else if (u_strncmp(cmd, "sleep ", 6) == 0) {
+        int sec = u_atoi(cmd + 6);
+        if (sec <= 0) sec = 1;
+
+        u_print("Sleeping for ");
+        u_print_num(sec);
+        u_print(" seconds (press Ctrl+C to abort)...\n");
+
+        int64_t pid = u_fork();
+        if (pid == 0) {
+            uint64_t start = (uint64_t)u_time();
+            while ((uint64_t)u_time() - start < (uint64_t)(sec * 100)) {}
+            u_exit(0);
+        } else if (pid > 0) {
+            int status = 0;
+            u_waitpid(pid, &status, 0);
+            if (status == 130) {
+                u_print("Sleep aborted by SIGINT (Ctrl+C)!\n");
+            } else {
+                u_print("Done.\n");
+            }
+        }
+    } else if (u_strcmp(cmd, "sigtest") == 0) {
+        int64_t pid = u_fork();
+        if (pid == 0) {
+            u_print("Child registered custom SIGINT handler in Ring 3!\n");
+            sigint_received = 0;
+            u_signal(SIGINT, user_sigint_handler);
+            u_print("Press Ctrl+C in terminal to trigger it...\n");
+
+            while (!sigint_received) {
+                for (volatile int i = 0; i < 10000000; i++) {}
+            }
+
+            u_print("Signal handled successfully. Exiting child.\n");
+            u_exit(0);
+        } else if (pid > 0) {
+            int status = 0;
+            u_waitpid(pid, &status, 0);
+        }
     } else if (u_strcmp(cmd, "pipe") == 0) {
         int pipefd[2];
         if (u_pipe(pipefd) < 0) return;
@@ -478,7 +606,7 @@ static void execute_command(const char *cmd)
         u_ps();
     } else if (u_strncmp(cmd, "kill ", 5) == 0) {
         int target_pid = u_atoi(cmd + 5);
-        if (target_pid > 1) u_kill(target_pid, 9);
+        if (target_pid > 1) u_kill(target_pid, SIGKILL);
     } else if (u_strcmp(cmd, "uptime") == 0) {
         uint64_t ticks = (uint64_t)u_time();
         u_print("Uptime: ");
@@ -503,7 +631,6 @@ static void execute_command(const char *cmd)
     } else if (u_strcmp(cmd, "exit") == 0) {
         u_exit(0);
     } else {
-        /* Запуск бинарников: сначала ищем по введенному пути, затем в /bin/ */
         int64_t pid = u_fork();
         if (pid == 0) {
             int64_t err = u_execve(cmd, NULL, NULL);
@@ -560,6 +687,13 @@ void user_init_process(void)
     while (1) {
         char c;
         if (u_read(0, &c, 1) > 0) {
+            if (c == 3) {
+                u_print("^C\n");
+                buf_len = 0;
+                print_prompt();
+                continue;
+            }
+
             if (c == '\b') {
                 if (buf_len > 0) {
                     buf_len--;

@@ -2,6 +2,9 @@
 #include <linux/tty.h>
 #include <linux/mm.h>
 #include <linux/gdt.h>
+#include <linux/string.h>
+
+extern volatile uint64_t jiffies;
 
 static union task_union init_task = {
     .task = {
@@ -16,7 +19,9 @@ static union task_union init_task = {
         .user_stack_page = 0,
         .start_brk = HEAP_START_VIRT,
         .brk = HEAP_START_VIRT,
-        .cwd = "/"
+        .cwd = "/",
+        .signal = 0,
+        .alarm = 0
     }
 };
 
@@ -31,6 +36,9 @@ void sched_init(void)
 {
     for (int i = 1; i < NR_TASKS; i++) {
         task[i] = NULL;
+    }
+    for (int s = 0; s < 32; s++) {
+        init_task.task.sig_fn[s] = (uint64_t)SIG_DFL;
     }
     kernel_current_stack = (uint64_t)&init_task + PAGE_SIZE;
     set_tss_stack(kernel_current_stack);
@@ -59,8 +67,14 @@ int task_create(void (*fn)(void), long priority)
     u->task.start_brk = HEAP_START_VIRT;
     u->task.brk = HEAP_START_VIRT;
     u->task.cr3 = 0;
+    u->task.signal = 0;
+    u->task.alarm = 0;
     u->task.cwd[0] = '/';
     u->task.cwd[1] = '\0';
+
+    for (int s = 0; s < 32; s++) {
+        u->task.sig_fn[s] = (uint64_t)SIG_DFL;
+    }
 
     for (int fd = 0; fd < NR_OPEN; fd++) {
         u->task.filp[fd].in_use = 0;
@@ -84,6 +98,15 @@ int task_create(void (*fn)(void), long priority)
 
     printk("[OK] Created Task PID %d (Priority %d)\n", i, priority);
     return i;
+}
+
+void send_signal(struct task_struct *t, int sig)
+{
+    if (!t || sig <= 0 || sig >= 32) return;
+    t->signal |= (1U << sig);
+    if (t->state == TASK_INTERRUPTIBLE) {
+        t->state = TASK_RUNNING; /* Будим процесс при получении сигнала */
+    }
 }
 
 void schedule(void)
@@ -125,6 +148,16 @@ void schedule(void)
 
 void do_timer(void)
 {
+    /* Проверяем пробуждение спящих задач */
+    for (int i = 1; i < NR_TASKS; i++) {
+        if (task[i] && task[i]->state == TASK_INTERRUPTIBLE) {
+            if (task[i]->alarm && jiffies >= task[i]->alarm) {
+                task[i]->state = TASK_RUNNING;
+                task[i]->alarm = 0;
+            }
+        }
+    }
+
     if (--current->counter > 0)
         return;
 

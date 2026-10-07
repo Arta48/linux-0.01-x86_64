@@ -49,6 +49,11 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
         while (bytes_read < count) {
             __asm__ volatile ("sti");
 
+            /* Если поступил сигнал (например Ctrl+C), немедленно прерываем чтение */
+            if (current->signal) {
+                return -1;
+            }
+
             char c = keyboard_getchar();
             if (c == 0) {
                 __asm__ volatile ("hlt");
@@ -132,6 +137,7 @@ static void sys_ps(void)
         if (task[i]) {
             const char *st = "UNKNOWN";
             if (task[i]->state == TASK_RUNNING) st = "RUNNING";
+            else if (task[i]->state == TASK_INTERRUPTIBLE) st = "SLEEP  ";
             else if (task[i]->state == TASK_ZOMBIE) st = "ZOMBIE ";
             printk("%d     %d     %s     %d        %d\n",
                    task[i]->pid, task[i]->father, st, task[i]->priority, task[i]->counter);
@@ -187,8 +193,6 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
 
 static int64_t sys_kill(int64_t pid, int sig)
 {
-    (void)sig;
-
     if (pid <= 1 || pid >= NR_TASKS || !task[pid]) {
         return -1;
     }
@@ -197,26 +201,25 @@ static int64_t sys_kill(int64_t pid, int sig)
         return -1;
     }
 
-    for (int i = 0; i < NR_OPEN; i++) {
-        if (task[pid]->filp[i].in_use) {
-            struct file *f = &task[pid]->filp[i];
-            if (f->type == FILE_TYPE_PIPE && f->pipe) {
-                if (f->mode == 1) f->pipe->readers--;
-                if (f->mode == 2) f->pipe->writers--;
-                f->pipe->ref_count--;
-                if (f->pipe->ref_count <= 0) {
-                    free_page((uint64_t)f->pipe);
-                }
-            }
-            f->in_use = 0;
-            f->pipe = NULL;
-        }
+    send_signal(task[pid], sig);
+    return 0;
+}
+
+/* sys_signal: регистрация пользовательского обработчика сигнала */
+static int64_t sys_signal(int sig, uint64_t handler)
+{
+    if (sig <= 0 || sig >= 32 || sig == SIGKILL) {
+        return -1;
     }
+    uint64_t old = current->sig_fn[sig];
+    current->sig_fn[sig] = handler;
+    return (int64_t)old;
+}
 
-    task[pid]->exit_code = 9;
-    task[pid]->state = TASK_ZOMBIE;
-    printk("\n[Process %d killed]\n", (int)pid);
-
+static int64_t sys_pause(void)
+{
+    current->state = TASK_INTERRUPTIBLE;
+    schedule();
     return 0;
 }
 
@@ -294,7 +297,7 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     return 0;
 }
 
-static int64_t sys_exit(int status)
+int64_t sys_exit(int status)
 {
     printk("\n[Process %d exited with status %d]\n", (int)current->pid, status);
 
@@ -313,54 +316,109 @@ static int64_t sys_exit(int status)
 
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, struct trap_frame *tf)
 {
+    int64_t ret = -1;
+
     switch (nr) {
         case __NR_fork:
             if (!tf) return -1;
-            return sys_fork(tf);
+            ret = sys_fork(tf);
+        break;
         case __NR_execve:
             if (!tf) return -1;
-            return sys_execve((const char *)arg1, (char **)arg2, (char **)arg3, tf);
+            ret = sys_execve((const char *)arg1, (char **)arg2, (char **)arg3, tf);
+        break;
         case __NR_pipe:
-            return sys_pipe((int *)arg1);
+            ret = sys_pipe((int *)arg1);
+            break;
         case __NR_open:
-            return sys_open((const char *)arg1, (int)arg2);
+            ret = sys_open((const char *)arg1, (int)arg2);
+            break;
         case __NR_close:
-            return sys_close((int)arg1);
+            ret = sys_close((int)arg1);
+            break;
         case __NR_unlink:
-            return sys_unlink((const char *)arg1);
+            ret = sys_unlink((const char *)arg1);
+            break;
         case __NR_dup2:
-            return sys_dup2((int)arg1, (int)arg2);
+            ret = sys_dup2((int)arg1, (int)arg2);
+            break;
         case __NR_chdir:
-            return sys_chdir((const char *)arg1);
+            ret = sys_chdir((const char *)arg1);
+            break;
         case __NR_mkdir:
-            return sys_mkdir((const char *)arg1);
+            ret = sys_mkdir((const char *)arg1);
+            break;
         case __NR_rmdir:
-            return sys_rmdir((const char *)arg1);
+            ret = sys_rmdir((const char *)arg1);
+            break;
         case __NR_getcwd:
-            return sys_getcwd((char *)arg1, arg2);
+            ret = sys_getcwd((char *)arg1, arg2);
+            break;
         case __NR_read:
-            return sys_read((int)arg1, (char *)arg2, arg3);
+            ret = sys_read((int)arg1, (char *)arg2, arg3);
+            break;
         case __NR_write:
-            return sys_write((int)arg1, (const char *)arg2, arg3);
+            ret = sys_write((int)arg1, (const char *)arg2, arg3);
+            break;
         case __NR_getpid:
-            return sys_getpid();
+            ret = sys_getpid();
+            break;
         case __NR_time:
-            return sys_time();
+            ret = sys_time();
+            break;
         case __NR_ps:
             sys_ps();
-            return 0;
+            ret = 0;
+            break;
         case __NR_list:
-            return sys_list((const char *)arg1, (char *)arg2, arg3);
+            ret = sys_list((const char *)arg1, (char *)arg2, arg3);
+            break;
         case __NR_waitpid:
-            return sys_waitpid((int64_t)arg1, (int *)arg2, (int)arg3);
+            ret = sys_waitpid((int64_t)arg1, (int *)arg2, (int)arg3);
+            break;
         case __NR_kill:
-            return sys_kill((int64_t)arg1, (int)arg2);
+            ret = sys_kill((int64_t)arg1, (int)arg2);
+            break;
+        case __NR_signal:
+            ret = sys_signal((int)arg1, arg2);
+            break;
+        case __NR_pause:
+            ret = sys_pause();
+            break;
         case __NR_brk:
-            return sys_brk(arg1);
+            ret = sys_brk(arg1);
+            break;
         case __NR_exit:
-            return sys_exit((int)arg1);
+            ret = sys_exit((int)arg1);
+            break;
         default:
             printk("[SYSCALL] Unknown syscall: %d\n", nr);
-            return -1;
+            ret = -1;
+            break;
     }
+
+    /* Обработка сигналов перед возвратом в Ring 3 */
+    if (current->signal && current->pid > 0) {
+        for (int sig = 1; sig < 32; sig++) {
+            if (current->signal & (1U << sig)) {
+                current->signal &= ~(1U << sig); /* Сбрасываем сигнал */
+
+                if (current->sig_fn[sig] == (uint64_t)SIG_IGN) {
+                    continue; /* Игнорируем */
+                }
+
+                if (current->sig_fn[sig] == (uint64_t)SIG_DFL) {
+                    /* Действие по умолчанию: завершаем процесс */
+                    sys_exit(128 + sig);
+                } else {
+                    /* Пользовательский обработчик: перенаправляем RIP */
+                    if (tf) {
+                        tf->rip = current->sig_fn[sig];
+                    }
+                }
+            }
+        }
+    }
+
+    return ret;
 }

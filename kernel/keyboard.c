@@ -1,4 +1,6 @@
 #include <linux/keyboard.h>
+#include <linux/sched.h>
+#include <linux/signal.h>
 #include <asm/io.h>
 
 #define KBD_DATA_PORT 0x60
@@ -9,6 +11,7 @@ static char kbd_buffer[BUFFER_SIZE];
 static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 static int shift_pressed = 0;
+static int ctrl_pressed = 0;
 
 static const char kbd_map[128] = {
     0,   27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -43,27 +46,30 @@ void keyboard_init(void)
     kbd_head = 0;
     kbd_tail = 0;
     shift_pressed = 0;
+    ctrl_pressed = 0;
 }
 
 void keyboard_handler(void)
 {
     uint8_t scancode = inb(KBD_DATA_PORT);
 
-    if (scancode == 0x2A || scancode == 0x36) {
-        shift_pressed = 1;
-        return;
-    }
-    if (scancode == 0xAA || scancode == 0xB6) {
-        shift_pressed = 0;
+    if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
+    if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return; }
+
+    if (scancode == 0x1D) { ctrl_pressed = 1; return; }
+    if (scancode == 0x9D) { ctrl_pressed = 0; return; }
+
+    /* Ctrl+C на PS/2 клавиатуре (scancode 0x2E = 'c') */
+    if (ctrl_pressed && scancode == 0x2E) {
+        if (current && current->pid > 0) {
+            send_signal(current, SIGINT);
+        }
         return;
     }
 
-    if (scancode & 0x80) {
-        return;
-    }
+    if (scancode & 0x80) return;
 
     char c = shift_pressed ? kbd_shift_map[scancode] : kbd_map[scancode];
-
     if (c != 0) {
         uint32_t next = (kbd_head + 1) % BUFFER_SIZE;
         if (next != kbd_tail) {
@@ -73,26 +79,40 @@ void keyboard_handler(void)
     }
 }
 
-/*
- * Чтение символа: поддерживает ввод как из терминала (COM1 stdio),
- * так и из графического окна QEMU (PS/2)
- */
+/* Опрос последовательного порта (терминал stdio) */
+void check_serial_events(void)
+{
+    while (inb(COM1_PORT + 5) & 0x01) {
+        char c = (char)inb(COM1_PORT);
+
+        if (c == 3) { /* Ctrl+C */
+            if (current && current->pid > 1) {
+                /* Дочерний процесс: посылаем сигнал SIGINT */
+                send_signal(current, SIGINT);
+                continue;
+            }
+            /* Если активен шелл (PID 1), передаем символ 3 для сброса строки */
+        }
+
+        if (c == '\r') c = '\n';
+        if (c == 127)  c = '\b';
+
+        uint32_t next = (kbd_head + 1) % BUFFER_SIZE;
+        if (next != kbd_tail) {
+            kbd_buffer[kbd_head] = c;
+            kbd_head = next;
+        }
+    }
+}
+
 char keyboard_getchar(void)
 {
-    /* 1. Проверяем ввод из терминала Linux (COM1 / stdio) */
-    if (inb(COM1_PORT + 5) & 0x01) {
-        char c = (char)inb(COM1_PORT);
-        if (c == '\r') c = '\n'; /* Enter в терминале */
-            if (c == 127)  c = '\b'; /* Backspace в терминале */
-                return c;
-    }
+    check_serial_events();
 
-    /* 2. Проверяем буфер клавиатуры PS/2 (окно VNC/GUI) */
     if (kbd_head != kbd_tail) {
         char c = kbd_buffer[kbd_tail];
         kbd_tail = (kbd_tail + 1) % BUFFER_SIZE;
         return c;
     }
-
     return 0;
 }

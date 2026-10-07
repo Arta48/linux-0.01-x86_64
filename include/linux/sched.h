@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
+#include <linux/signal.h>
 
 #define NR_TASKS 64
 
@@ -27,7 +28,10 @@ struct task_struct {
     uint64_t user_stack_page;
     uint64_t start_brk;
     uint64_t brk;
-    char cwd[64];              /* Текущий рабочий каталог процесса */
+    char cwd[64];
+    uint32_t signal;           /* Битовая маска ожидающих сигналов */
+    uint64_t sig_fn[32];       /* Таблица адресов обработчиков сигналов в Ring 3 */
+    uint64_t alarm;            /* Таймаут сна (в тиках jiffies) */
     struct file filp[NR_OPEN];
 };
 
@@ -44,5 +48,6 @@ void schedule(void);
 void do_timer(void);
 
 int task_create(void (*fn)(void), long priority);
+void send_signal(struct task_struct *t, int sig);
 
 #endif
