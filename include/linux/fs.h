@@ -5,22 +5,26 @@
 
 #define NR_OPEN       16
 #define MAX_FILENAME  32
-#define MAX_FILES     16
+#define MAX_FILES     32
 #define PIPE_BUF_SIZE 4064
 
 #define FILE_TYPE_REGULAR 1
 #define FILE_TYPE_PIPE    2
 
-/* Базовый виртуальный адрес для загрузки исполняемых файлов (1.5 ГБ) */
-#define USER_TEXT_BASE 0x60000000ULL
+/* Стандартные флаги open */
+#define O_RDONLY 00
+#define O_WRONLY 01
+#define O_RDWR   02
+#define O_CREAT  0100
+#define O_TRUNC  01000
 
-/* Сигнатура исполняемого бинарного формата: "LINUS001" */
-#define EXEC_MAGIC 0x4C494E5553303031ULL
+#define USER_TEXT_BASE 0x60000000ULL
+#define EXEC_MAGIC     0x4C494E5553303031ULL
 
 struct exec_header {
-    uint64_t magic;      /* "LINUS001" */
-    uint64_t entry;      /* Точка входа (RIP) */
-    uint64_t text_size;  /* Размер машинного кода */
+    uint64_t magic;
+    uint64_t entry;
+    uint64_t text_size;
 } __attribute__((packed));
 
 struct pipe {
@@ -33,14 +37,21 @@ struct pipe {
     char buffer[PIPE_BUF_SIZE];
 };
 
-struct file {
-    int type;
-    int mode;
-    const char *name;
-    const char *data;
+struct ram_file {
+    char name[MAX_FILENAME];
+    char *data;
     uint64_t size;
-    uint64_t pos;
-    struct pipe *pipe;
+    uint64_t capacity;
+    int in_use;
+    int is_readonly;
+};
+
+struct file {
+    int type;                  /* REGULAR или PIPE */
+    int mode;                  /* 1 = чтение, 2 = запись, 3 = чтение/запись */
+    uint64_t pos;              /* Текущая позиция чтения/записи */
+    struct ram_file *rf;       /* Указатель на файл в RamFS */
+    struct pipe *pipe;         /* Указатель на канал */
     int in_use;
 };
 
@@ -48,6 +59,8 @@ void fs_init(void);
 int64_t sys_open(const char *filename, int flags);
 int64_t sys_close(int fd);
 int64_t sys_file_read(int fd, char *buf, uint64_t count);
+int64_t sys_file_write(int fd, const char *buf, uint64_t count);
+int64_t sys_unlink(const char *filename);
 int64_t sys_list(char *buf, uint64_t max_len);
 
 int64_t sys_pipe(int *pipefd);

@@ -62,10 +62,16 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
 
 static int64_t sys_write(int fd, const char *buf, uint64_t count)
 {
-    if (fd >= 3 && fd < NR_OPEN && current->filp[fd].in_use && current->filp[fd].type == FILE_TYPE_PIPE) {
-        return pipe_write(&current->filp[fd], buf, count);
+    /* Запись в открытый файл или канал (fd >= 3) */
+    if (fd >= 3 && fd < NR_OPEN && current->filp[fd].in_use) {
+        if (current->filp[fd].type == FILE_TYPE_PIPE) {
+            return pipe_write(&current->filp[fd], buf, count);
+        } else {
+            return sys_file_write(fd, buf, count);
+        }
     }
 
+    /* Вывод в терминал/консоль (stdout/stderr) */
     (void)fd;
     for (uint64_t i = 0; i < count; i++) {
         console_putc(buf[i]);
@@ -157,17 +163,7 @@ static int64_t sys_kill(int64_t pid, int sig)
 
     for (int i = 3; i < NR_OPEN; i++) {
         if (task[pid]->filp[i].in_use) {
-            struct file *f = &task[pid]->filp[i];
-            if (f->type == FILE_TYPE_PIPE && f->pipe) {
-                if (f->mode == 1) f->pipe->readers--;
-                if (f->mode == 2) f->pipe->writers--;
-                f->pipe->ref_count--;
-                if (f->pipe->ref_count <= 0) {
-                    free_page((uint64_t)f->pipe);
-                }
-            }
-            f->in_use = 0;
-            f->pipe = NULL;
+            sys_close(i);
         }
     }
 
@@ -201,7 +197,6 @@ static int64_t sys_brk(uint64_t new_brk)
     return (int64_t)current->brk;
 }
 
-/* sys_execve: загрузка бинарной программы в пространство процесса */
 static int64_t sys_execve(const char *filename, char **argv, char **envp, struct trap_frame *tf)
 {
     (void)argv;
@@ -212,23 +207,20 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     uint64_t file_size = 0;
     const char *data = fs_get_file_data(filename, &file_size);
     if (!data || file_size < sizeof(struct exec_header)) {
-        return -1; /* Файл не найден или слишком мал */
+        return -1;
     }
 
     const struct exec_header *hdr = (const struct exec_header *)data;
     if (hdr->magic != EXEC_MAGIC) {
-        return -1; /* Неверный формат исполняемого файла */
+        return -1;
     }
 
-    /* 1. Выделяем и маппим страницу памяти под сегмент кода бинарника */
     uint64_t text_phys = get_free_page();
     if (!text_phys) return -1;
     map_page(NULL, USER_TEXT_BASE, text_phys, PTE_WRITABLE | PTE_USER);
 
-    /* Копируем машинный код бинарника (без заголовка) по адресу 0x60000000 + sizeof(exec_header) */
     memcpy((void *)USER_TEXT_BASE, data, file_size);
 
-    /* 2. Выделяем чистую страницу для стека новой программы */
     uint64_t new_stack = get_free_page();
     if (!new_stack) return -1;
 
@@ -238,23 +230,20 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     current->user_stack_page = new_stack;
     uint64_t user_rsp = new_stack + PAGE_SIZE - 16;
 
-    /* 3. Сбрасываем кучу процесса */
     current->start_brk = HEAP_START_VIRT;
     current->brk = HEAP_START_VIRT;
 
-    /* 4. Закрываем пользовательские дескрипторы 3..15 */
     for (int i = 3; i < NR_OPEN; i++) {
         if (current->filp[i].in_use) {
             sys_close(i);
         }
     }
 
-    /* 5. Подменяем регистры в trap_frame для перехода в новый бинарник */
     tf->rip = hdr->entry;
     tf->rsp = user_rsp;
     tf->rbp = user_rsp;
     tf->rax = 0;
-    tf->rflags = 0x202; /* IF=1 */
+    tf->rflags = 0x202;
 
     return 0;
 }
@@ -291,6 +280,8 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             return sys_open((const char *)arg1, (int)arg2);
         case __NR_close:
             return sys_close((int)arg1);
+        case __NR_unlink:
+            return sys_unlink((const char *)arg1);
         case __NR_read:
             return sys_read((int)arg1, (char *)arg2, arg3);
         case __NR_write:

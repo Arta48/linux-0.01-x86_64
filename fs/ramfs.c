@@ -2,96 +2,64 @@
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/string.h>
+#include <linux/mm.h>
 
-struct ram_file {
-    char name[MAX_FILENAME];
-    const char *data;
-    uint64_t size;
-};
-
-/*
- * БИНАРНАЯ ПРОГРАММА 1: hello
- * Заголовок LINUS001 + машинный код x86_64
- */
 static const unsigned char bin_hello[] = {
-    /* 1. Заголовок exec_header (24 байта) */
-    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C, /* magic: "LINUS001" */
-    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, /* entry: 0x60000018 (сразу за заголовком) */
-    0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* text_size */
-
-    /* 2. Машинный код инструкции x86_64 */
-    /* movq $4, %rax (sys_write) */
+    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
+    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
+    0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    /* movq $1, %rdi (stdout) */
     0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    /* leaq msg(%rip), %rsi */
     0x48, 0x8d, 0x35, 0x15, 0x00, 0x00, 0x00,
-    /* movq $52, %rdx (длина сообщения) */
     0x48, 0xc7, 0xc2, 0x34, 0x00, 0x00, 0x00,
-    /* syscall */
     0x0f, 0x05,
-
-    /* movq $1, %rax (sys_exit) */
     0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,
-    /* movq $42, %rdi (код возврата = 42) */
     0x48, 0xc7, 0xc7, 0x2a, 0x00, 0x00, 0x00,
-    /* syscall */
     0x0f, 0x05,
-
-    /* Сообщение msg */
     'H', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ',
     's', 't', 'a', 'n', 'd', 'a', 'l', 'o', 'n', 'e', ' ',
     'b', 'i', 'n', 'a', 'r', 'y', ' ', 'l', 'o', 'a', 'd', 'e', 'd', ' ',
     'b', 'y', ' ', 'e', 'x', 'e', 'c', 'v', 'e', '!', '\n', '\0'
 };
 
-/*
- * БИНАРНАЯ ПРОГРАММА 2: calc
- * Считает (10 + 20) * 3 = 90 и завершается с кодом выхода 90
- */
 static const unsigned char bin_calc[] = {
-    /* 1. Заголовок exec_header (24 байта) */
-    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C, /* magic: "LINUS001" */
-    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, /* entry: 0x60000018 */
-    0x4A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* text_size */
-
-    /* 2. Машинный код инструкции x86_64 */
-    /* movq $4, %rax (sys_write) */
+    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
+    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
+    0x4A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    /* movq $1, %rdi (stdout) */
     0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    /* leaq msg(%rip), %rsi */
     0x48, 0x8d, 0x35, 0x24, 0x00, 0x00, 0x00,
-    /* movq $42, %rdx */
     0x48, 0xc7, 0xc2, 0x2a, 0x00, 0x00, 0x00,
-    /* syscall */
     0x0f, 0x05,
-
-    /* Вычисление: (10 + 20) * 3 = 90 */
-    /* movq $10, %rax */
     0x48, 0xc7, 0xc0, 0x0a, 0x00, 0x00, 0x00,
-    /* addq $20, %rax */
     0x48, 0x05, 0x14, 0x00, 0x00, 0x00,
-    /* imulq $3, %rax */
     0x48, 0x6b, 0xc0, 0x03,
-
-    /* movq %rax, %rdi (код возврата = 90) */
     0x48, 0x89, 0xc7,
-    /* movq $1, %rax (sys_exit) */
     0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,
-    /* syscall */
     0x0f, 0x05,
-
-    /* Сообщение msg */
     '[', 'C', 'A', 'L', 'C', ']', ' ', 'C', 'o', 'm', 'p', 'u', 't', 'i', 'n', 'g', ' ',
     '(', '1', '0', ' ', '+', ' ', '2', '0', ')', ' ', '*', ' ', '3', ' ', 'i', 'n', ' ',
     'R', 'i', 'n', 'g', ' ', '3', '.', '.', '.', '\n', '\0'
 };
 
-static struct ram_file files[] = {
-    {
-        .name = "README.txt",
-        .data = "====================================================\n"
+/* Таблица файлов RamFS на 32 слота */
+static struct ram_file ram_files[MAX_FILES];
+
+void fs_init(void)
+{
+    for (int i = 0; i < MAX_FILES; i++) {
+        ram_files[i].in_use = 0;
+        ram_files[i].name[0] = '\0';
+        ram_files[i].data = NULL;
+        ram_files[i].size = 0;
+        ram_files[i].capacity = 0;
+        ram_files[i].is_readonly = 0;
+    }
+
+    /* Инициализируем системные файлы (Read-Only) */
+    const char *init_names[] = { "README.txt", "version", "author", "motd", "hello", "calc" };
+    const char *init_data[] = {
+        "====================================================\n"
         "  Linux 0.01 (x86_64 Edition)\n"
         "  Re-engineered for 64-bit Long Mode from 1991 code.\n"
         "====================================================\n"
@@ -102,53 +70,41 @@ static struct ram_file files[] = {
         "  - Fast hardware MSR syscall / sysret\n"
         "  - In-memory Virtual File System (RamFS)\n"
         "  - Inter-Process Communication (Unix Pipes)\n"
-        "  - Binary program loader (sys_execve)\n",
-        .size = 0
-    },
-    {
-        .name = "version",
-        .data = "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
-        .size = 0
-    },
-    {
-        .name = "author",
-        .data = "Original: Linus Torvalds (Helsinki, 1991)\n"
-        "x86_64 Port: Educational Project (2026)\n",
-        .size = 0
-    },
-    {
-        .name = "motd",
-        .data = "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
-        .size = 0
-    },
-    {
-        .name = "hello",
-        .data = (const char *)bin_hello,
-        .size = sizeof(bin_hello)
-    },
-    {
-        .name = "calc",
-        .data = (const char *)bin_calc,
-        .size = sizeof(bin_calc)
-    }
-};
+        "  - Binary program loader (sys_execve)\n"
+        "  - Writable VFS, touch, rm & shell I/O redirection\n",
 
-#define TOTAL_FILES (sizeof(files) / sizeof(files[0]))
+        "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
+        "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
+        "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
+        (const char *)bin_hello,
+        (const char *)bin_calc
+    };
 
-void fs_init(void)
-{
-    for (uint64_t i = 0; i < 4; i++) {
-        files[i].size = strlen(files[i].data);
+    uint64_t init_sizes[] = {
+        0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc)
+    };
+
+    for (int i = 0; i < 6; i++) {
+        uint64_t nlen = strlen(init_names[i]);
+        if (nlen >= MAX_FILENAME) nlen = MAX_FILENAME - 1;
+        memcpy(ram_files[i].name, init_names[i], nlen);
+        ram_files[i].name[nlen] = '\0';
+        ram_files[i].data = (char *)init_data[i];
+        ram_files[i].size = (i < 4) ? strlen(init_data[i]) : init_sizes[i];
+        ram_files[i].capacity = ram_files[i].size;
+        ram_files[i].in_use = 1;
+        ram_files[i].is_readonly = 1; /* Системные файлы защищены от удаления */
     }
-    printk("[OK] Virtual File System (RamFS) Initialized (%d embedded files/binaries)\n", (int)TOTAL_FILES);
+
+    printk("[OK] Dynamic Virtual File System Initialized (32 file slots)\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
 {
-    for (uint64_t i = 0; i < TOTAL_FILES; i++) {
-        if (strcmp(name, files[i].name) == 0) {
-            if (out_size) *out_size = files[i].size;
-            return files[i].data;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].in_use && strcmp(name, ram_files[i].name) == 0) {
+            if (out_size) *out_size = ram_files[i].size;
+            return ram_files[i].data;
         }
     }
     return NULL;
@@ -156,29 +112,59 @@ const char *fs_get_file_data(const char *name, uint64_t *out_size)
 
 int64_t sys_open(const char *filename, int flags)
 {
-    (void)flags;
-
     int file_idx = -1;
-    for (uint64_t i = 0; i < TOTAL_FILES; i++) {
-        if (strcmp(filename, files[i].name) == 0) {
-            file_idx = (int)i;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].in_use && strcmp(filename, ram_files[i].name) == 0) {
+            file_idx = i;
             break;
         }
     }
 
+    /* Файл не найден: создаем, если передан O_CREAT */
     if (file_idx == -1) {
-        return -1;
+        if (!(flags & O_CREAT)) {
+            return -1;
+        }
+
+        /* Ищем свободный слот в таблице RamFS */
+        for (int i = 0; i < MAX_FILES; i++) {
+            if (!ram_files[i].in_use) {
+                file_idx = i;
+                break;
+            }
+        }
+        if (file_idx == -1) return -1; /* Нет свободных слотов */
+
+            /* Выделяем страницу памяти 4 КБ под данные нового файла */
+            uint64_t page = get_free_page();
+        if (!page) return -1;
+
+        uint64_t nlen = strlen(filename);
+        if (nlen >= MAX_FILENAME) nlen = MAX_FILENAME - 1;
+        memcpy(ram_files[file_idx].name, filename, nlen);
+        ram_files[file_idx].name[nlen] = '\0';
+
+        ram_files[file_idx].data = (char *)page;
+        ram_files[file_idx].size = 0;
+        ram_files[file_idx].capacity = PAGE_SIZE;
+        ram_files[file_idx].in_use = 1;
+        ram_files[file_idx].is_readonly = 0;
     }
 
+    /* Очистка содержимого при O_TRUNC */
+    if ((flags & O_TRUNC) && !ram_files[file_idx].is_readonly) {
+        ram_files[file_idx].size = 0;
+    }
+
+    /* Ищем свободный дескриптор в filp[] процесса */
     for (int fd = 3; fd < NR_OPEN; fd++) {
         if (!current->filp[fd].in_use) {
             current->filp[fd].type = FILE_TYPE_REGULAR;
-            current->filp[fd].name = files[file_idx].name;
-            current->filp[fd].data = files[file_idx].data;
-            current->filp[fd].size = files[file_idx].size;
+            current->filp[fd].rf   = &ram_files[file_idx];
             current->filp[fd].pos  = 0;
             current->filp[fd].pipe = NULL;
             current->filp[fd].in_use = 1;
+            current->filp[fd].mode = (flags & 3) ? (flags & 3) : 1;
             return fd;
         }
     }
@@ -207,6 +193,7 @@ int64_t sys_close(int fd)
     f->in_use = 0;
     f->type = 0;
     f->mode = 0;
+    f->rf = NULL;
     f->pipe = NULL;
     return 0;
 }
@@ -223,29 +210,91 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
         return pipe_read(f, buf, count);
     }
 
-    if (f->pos >= f->size) {
+    struct ram_file *rf = f->rf;
+    if (!rf || f->pos >= rf->size) {
         return 0;
     }
 
     uint64_t bytes_to_read = count;
-    if (f->pos + bytes_to_read > f->size) {
-        bytes_to_read = f->size - f->pos;
+    if (f->pos + bytes_to_read > rf->size) {
+        bytes_to_read = rf->size - f->pos;
     }
 
     for (uint64_t i = 0; i < bytes_to_read; i++) {
-        buf[i] = f->data[f->pos + i];
+        buf[i] = rf->data[f->pos + i];
     }
 
     f->pos += bytes_to_read;
     return bytes_to_read;
 }
 
+int64_t sys_file_write(int fd, const char *buf, uint64_t count)
+{
+    if (fd < 3 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+        return -1;
+    }
+
+    struct file *f = &current->filp[fd];
+
+    if (f->type == FILE_TYPE_PIPE) {
+        return pipe_write(f, buf, count);
+    }
+
+    struct ram_file *rf = f->rf;
+    if (!rf || rf->is_readonly) {
+        return -1; /* Запрещена запись в защищенные файлы */
+    }
+
+    uint64_t bytes_to_write = count;
+    if (f->pos + bytes_to_write > rf->capacity) {
+        bytes_to_write = rf->capacity - f->pos;
+    }
+
+    for (uint64_t i = 0; i < bytes_to_write; i++) {
+        rf->data[f->pos + i] = buf[i];
+    }
+
+    f->pos += bytes_to_write;
+    if (f->pos > rf->size) {
+        rf->size = f->pos;
+    }
+
+    return bytes_to_write;
+}
+
+/* sys_unlink: удаление файла и освобождение его памяти */
+int64_t sys_unlink(const char *filename)
+{
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].in_use && strcmp(filename, ram_files[i].name) == 0) {
+            if (ram_files[i].is_readonly) {
+                return -1; /* Нельзя удалять системные файлы */
+            }
+
+            /* Освобождаем память данных файла */
+            if (ram_files[i].data) {
+                free_page((uint64_t)ram_files[i].data);
+            }
+
+            ram_files[i].in_use = 0;
+            ram_files[i].name[0] = '\0';
+            ram_files[i].data = NULL;
+            ram_files[i].size = 0;
+            ram_files[i].capacity = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int64_t sys_list(char *buf, uint64_t max_len)
 {
     uint64_t offset = 0;
 
-    for (uint64_t i = 0; i < TOTAL_FILES; i++) {
-        const char *name = files[i].name;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!ram_files[i].in_use) continue;
+
+        const char *name = ram_files[i].name;
         while (*name && offset < max_len - 16) {
             buf[offset++] = *name++;
         }
@@ -254,7 +303,7 @@ int64_t sys_list(char *buf, uint64_t max_len)
 
         char num[16];
         int ni = 0;
-        uint64_t sz = files[i].size;
+        uint64_t sz = ram_files[i].size;
         if (sz == 0) num[ni++] = '0';
         while (sz > 0) {
             num[ni++] = '0' + (sz % 10);

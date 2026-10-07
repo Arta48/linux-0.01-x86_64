@@ -42,6 +42,11 @@ static inline int64_t u_close(int fd)
     return u_syscall(__NR_close, fd, 0, 0);
 }
 
+static inline int64_t u_unlink(const char *path)
+{
+    return u_syscall(__NR_unlink, (uint64_t)path, 0, 0);
+}
+
 static inline int64_t u_read(int fd, char *buf, uint64_t count)
 {
     return u_syscall(__NR_read, fd, (uint64_t)buf, count);
@@ -107,84 +112,7 @@ static inline void u_exit(int status)
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* Аллокатор памяти malloc / free */
-struct block_header {
-    uint64_t size;
-    int is_free;
-    struct block_header *next;
-};
-
-static struct block_header *heap_head = NULL;
-
-static void *u_sbrk(int64_t increment)
-{
-    uint64_t cur_brk = (uint64_t)u_brk(0);
-    if (increment == 0) {
-        return (void *)cur_brk;
-    }
-
-    uint64_t new_brk = cur_brk + increment;
-    uint64_t res = (uint64_t)u_brk(new_brk);
-    if (res < new_brk) {
-        return (void *)-1;
-    }
-    return (void *)cur_brk;
-}
-
-static void *u_malloc(uint64_t size)
-{
-    if (size == 0) return NULL;
-    size = (size + 15) & ~15ULL;
-
-    struct block_header *curr = heap_head;
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            curr->is_free = 0;
-            return (void *)(curr + 1);
-        }
-        curr = curr->next;
-    }
-
-    uint64_t total_size = sizeof(struct block_header) + size;
-    void *raw = u_sbrk((int64_t)total_size);
-    if (raw == (void *)-1) {
-        return NULL;
-    }
-
-    struct block_header *new_block = (struct block_header *)raw;
-    new_block->size = size;
-    new_block->is_free = 0;
-    new_block->next = NULL;
-
-    if (!heap_head) {
-        heap_head = new_block;
-    } else {
-        curr = heap_head;
-        while (curr->next) curr = curr->next;
-        curr->next = new_block;
-    }
-
-    return (void *)(new_block + 1);
-}
-
-static void u_free(void *ptr)
-{
-    if (!ptr) return;
-    struct block_header *hdr = (struct block_header *)ptr - 1;
-    hdr->is_free = 1;
-
-    struct block_header *curr = heap_head;
-    while (curr && curr->next) {
-        if (curr->is_free && curr->next->is_free) {
-            curr->size += sizeof(struct block_header) + curr->next->size;
-            curr->next = curr->next->next;
-        } else {
-            curr = curr->next;
-        }
-    }
-}
-
-/* Строковые вспомогательные функции */
+/* Строковые функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -265,114 +193,140 @@ static void execute_command(const char *cmd)
         return;
     }
 
+    /* 1. Обработка перенаправления вывода: echo <текст> > <файл> */
+    const char *redir = cmd;
+    while (*redir && *redir != '>') redir++;
+
+    if (*redir == '>') {
+        char left[64];
+        char right[MAX_FILENAME];
+
+        uint64_t l_len = redir - cmd;
+        if (l_len >= sizeof(left)) l_len = sizeof(left) - 1;
+        for (uint64_t i = 0; i < l_len; i++) left[i] = cmd[i];
+        while (l_len > 0 && (left[l_len - 1] == ' ' || left[l_len - 1] == '\t')) l_len--;
+        left[l_len] = '\0';
+
+        const char *fname = redir + 1;
+        while (*fname == ' ' || *fname == '\t') fname++;
+        uint64_t r_len = 0;
+        while (fname[r_len] && fname[r_len] != ' ' && fname[r_len] != '\t' && r_len < MAX_FILENAME - 1) {
+            right[r_len] = fname[r_len];
+            r_len++;
+        }
+        right[r_len] = '\0';
+
+        const char *text = left;
+        if (u_strncmp(left, "echo ", 5) == 0) text = left + 5;
+
+        int64_t fd = u_open(right, O_CREAT | O_WRONLY | O_TRUNC);
+        if (fd < 0) {
+            u_print("shell: failed to redirect to file: ");
+            u_print(right);
+            u_print("\n");
+            return;
+        }
+
+        uint64_t tlen = 0;
+        while (text[tlen]) tlen++;
+        u_write(fd, text, tlen);
+        u_write(fd, "\n", 1);
+        u_close(fd);
+        return;
+    }
+
+    /* 2. Стандартные встроенные команды */
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
-        u_print("  help         - show this help message\n");
-        u_print("  ls           - list files/binaries in RamFS\n");
-        u_print("  cat <file>   - display file contents\n");
-        u_print("  <binary>     - execute binary via fork() + execve()\n");
-        u_print("  heap         - inspect process heap (brk / sbrk)\n");
-        u_print("  malloc <sz>  - allocate <sz> bytes on the heap\n");
-        u_print("  malloctest   - stress test malloc() and free()\n");
-        u_print("  pipe         - test Unix IPC pipe (auto-reaped)\n");
-        u_print("  fork         - test fork and waitpid reaping\n");
-        u_print("  spawn        - spawn background infinite process\n");
-        u_print("  kill <pid>   - kill process by PID\n");
-        u_print("  wait         - reap zombie processes\n");
-        u_print("  ps           - show running processes\n");
-        u_print("  bench        - benchmark 'int 0x80' vs 'syscall'\n");
-        u_print("  uptime       - show system uptime\n");
-        u_print("  getpid       - show current process ID\n");
-        u_print("  clear        - clear the console screen\n");
-        u_print("  echo ..      - print arguments to console\n");
-        u_print("  exit         - terminate this shell process\n");
+        u_print("  help            - show this help message\n");
+        u_print("  ls              - list files/binaries in RamFS\n");
+        u_print("  cat <file>      - display file contents\n");
+        u_print("  touch <file>    - create an empty file\n");
+        u_print("  rm <file>       - remove file (sys_unlink)\n");
+        u_print("  write <f> <txt> - write text to file\n");
+        u_print("  echo .. > <f>   - redirect output to file\n");
+        u_print("  <binary>        - execute binary via fork() + execve()\n");
+        u_print("  heap            - inspect process heap (brk / sbrk)\n");
+        u_print("  pipe            - test Unix IPC pipe\n");
+        u_print("  fork            - test fork and waitpid reaping\n");
+        u_print("  spawn / kill    - process management\n");
+        u_print("  bench           - benchmark 'int 0x80' vs 'syscall'\n");
+        u_print("  clear / exit    - terminal control\n");
+    } else if (u_strcmp(cmd, "ls") == 0) {
+        char buf[512];
+        if (u_list(buf, sizeof(buf)) > 0) {
+            u_print(buf);
+        }
+    } else if (u_strncmp(cmd, "touch ", 6) == 0) {
+        const char *fname = cmd + 6;
+        while (*fname == ' ') fname++;
+        int64_t fd = u_open(fname, O_CREAT | O_WRONLY);
+        if (fd >= 0) {
+            u_close(fd);
+        } else {
+            u_print("touch: cannot create file: ");
+            u_print(fname);
+            u_print("\n");
+        }
+    } else if (u_strncmp(cmd, "rm ", 3) == 0) {
+        const char *fname = cmd + 3;
+        while (*fname == ' ') fname++;
+        if (u_unlink(fname) != 0) {
+            u_print("rm: cannot remove file (read-only or not found): ");
+            u_print(fname);
+            u_print("\n");
+        }
+    } else if (u_strncmp(cmd, "write ", 6) == 0) {
+        const char *rest = cmd + 6;
+        while (*rest == ' ') rest++;
+        char fname[MAX_FILENAME];
+        int fi = 0;
+        while (*rest && *rest != ' ' && fi < MAX_FILENAME - 1) {
+            fname[fi++] = *rest++;
+        }
+        fname[fi] = '\0';
+        while (*rest == ' ') rest++;
+
+        int64_t fd = u_open(fname, O_CREAT | O_WRONLY | O_TRUNC);
+        if (fd < 0) {
+            u_print("write: cannot open file: ");
+            u_print(fname);
+            u_print("\n");
+        } else {
+            uint64_t tlen = 0;
+            while (rest[tlen]) tlen++;
+            u_write(fd, rest, tlen);
+            u_write(fd, "\n", 1);
+            u_close(fd);
+        }
+    } else if (u_strncmp(cmd, "cat ", 4) == 0) {
+        const char *filename = cmd + 4;
+        while (*filename == ' ') filename++;
+
+        int64_t fd = u_open(filename, O_RDONLY);
+        if (fd < 0) {
+            u_print("cat: file not found: ");
+            u_print(filename);
+            u_print("\n");
+        } else {
+            char fbuf[128];
+            int64_t n;
+            while ((n = u_read(fd, fbuf, sizeof(fbuf) - 1)) > 0) {
+                fbuf[n] = '\0';
+                u_write(1, fbuf, n);
+            }
+            u_close(fd);
+        }
     } else if (u_strcmp(cmd, "heap") == 0) {
         uint64_t cur_brk = (uint64_t)u_brk(0);
         uint64_t heap_size = cur_brk - HEAP_START_VIRT;
-
         u_print("Process Heap Info:\n  Start Break : ");
         u_print_hex(HEAP_START_VIRT);
         u_print("\n  Current Break: ");
         u_print_hex(cur_brk);
         u_print("\n  Heap Size   : ");
         u_print_num(heap_size);
-        u_print(" bytes (");
-        u_print_num((heap_size + 4095) / 4096);
-        u_print(" pages)\n");
-    } else if (u_strncmp(cmd, "malloc ", 7) == 0) {
-        uint64_t sz = (uint64_t)u_atoi(cmd + 7);
-        if (sz == 0) {
-            u_print("malloc: size must be > 0\n");
-            return;
-        }
-
-        void *ptr = u_malloc(sz);
-        if (!ptr) {
-            u_print("malloc: out of memory!\n");
-        } else {
-            u_print("Allocated ");
-            u_print_num(sz);
-            u_print(" bytes at address: ");
-            u_print_hex((uint64_t)ptr);
-            u_print("\nWriting test pattern...\n");
-
-            char *cp = (char *)ptr;
-            for (uint64_t i = 0; i < sz - 1 && i < 26; i++) {
-                cp[i] = 'A' + i;
-            }
-            cp[(sz > 26 ? 26 : sz - 1)] = '\0';
-
-            u_print("Data verification: \"");
-            u_print(cp);
-            u_print("\"\nFreeing allocated block...\n");
-            u_free(ptr);
-            u_print("Block freed successfully!\n");
-        }
-    } else if (u_strcmp(cmd, "malloctest") == 0) {
-        u_print("--- Running malloc / free Stress Test ---\n");
-
-        u_print("1. Allocating 3 blocks: B1 (64B), B2 (256B), B3 (1024B)...\n");
-        char *b1 = (char *)u_malloc(64);
-        char *b2 = (char *)u_malloc(256);
-        char *b3 = (char *)u_malloc(1024);
-
-        u_print("   B1 at "); u_print_hex((uint64_t)b1); u_print("\n");
-        u_print("   B2 at "); u_print_hex((uint64_t)b2); u_print("\n");
-        u_print("   B3 at "); u_print_hex((uint64_t)b3); u_print("\n");
-
-        u_print("2. Writing test patterns into B1, B2, B3...\n");
-        b1[0] = 'X'; b1[1] = '\0';
-        b2[0] = 'Y'; b2[1] = '\0';
-        b3[0] = 'Z'; b3[1] = '\0';
-
-        u_print("3. Freeing middle block B2...\n");
-        u_free(b2);
-
-        u_print("4. Allocating B4 (128B) - should reuse B2's slot without heap expansion...\n");
-        char *b4 = (char *)u_malloc(128);
-        u_print("   B4 at "); u_print_hex((uint64_t)b4);
-        if (b4 == b2) {
-            u_print(" (EXACT MATCH: B2 reused successfully!)\n");
-        } else {
-            u_print(" (Allocated new)\n");
-        }
-
-        u_print("5. Freeing B1, B4, B3 (Coalescing test)...\n");
-        u_free(b1);
-        u_free(b4);
-        u_free(b3);
-
-        u_print("6. Allocating big block B5 (2048B) across merged space...\n");
-        char *b5 = (char *)u_malloc(2048);
-        u_print("   B5 at "); u_print_hex((uint64_t)b5);
-        if (b5 == b1) {
-            u_print(" (COALESCING PASSED: Reused merged blocks!)\n");
-        } else {
-            u_print("\n");
-        }
-        u_free(b5);
-
-        u_print("--- Malloc / Free Test Passed 100%! ---\n");
+        u_print(" bytes\n");
     } else if (u_strcmp(cmd, "pipe") == 0) {
         int pipefd[2];
         if (u_pipe(pipefd) < 0) {
@@ -474,29 +428,6 @@ static void execute_command(const char *cmd)
         } else {
             u_print("wait: no zombie children to reap\n");
         }
-    } else if (u_strcmp(cmd, "ls") == 0) {
-        char buf[512];
-        if (u_list(buf, sizeof(buf)) > 0) {
-            u_print(buf);
-        }
-    } else if (u_strncmp(cmd, "cat ", 4) == 0) {
-        const char *filename = cmd + 4;
-        while (*filename == ' ') filename++;
-
-        int64_t fd = u_open(filename, 0);
-        if (fd < 0) {
-            u_print("cat: file not found: ");
-            u_print(filename);
-            u_print("\n");
-        } else {
-            char fbuf[128];
-            int64_t n;
-            while ((n = u_read(fd, fbuf, sizeof(fbuf) - 1)) > 0) {
-                fbuf[n] = '\0';
-                u_write(1, fbuf, n);
-            }
-            u_close(fd);
-        }
     } else if (u_strcmp(cmd, "bench") == 0) {
         u_print("Running benchmark: 500,000 getpid() syscalls...\n");
 
@@ -540,15 +471,11 @@ static void execute_command(const char *cmd)
         u_print("Exiting shell...\n");
         u_exit(0);
     } else {
-        /*
-         * ВНЕШНЯЯ КОМАНДА: ПАТТЕРН UNIX FORK + EXECVE!
-         * Если команда не встроена в шелл, ищем бинарный файл в RamFS!
-         */
+        /* Внешняя бинарная программа: fork + execve */
         int64_t pid = u_fork();
         if (pid < 0) {
             u_print("shell: fork failed\n");
         } else if (pid == 0) {
-            /* Дочерний процесс замещает себя новой программой */
             int64_t err = u_execve(cmd, NULL, NULL);
             if (err < 0) {
                 u_print("shell: command or binary not found: ");
@@ -557,7 +484,6 @@ static void execute_command(const char *cmd)
                 u_exit(127);
             }
         } else {
-            /* Родительский шелл ожидает завершения программы */
             int status = 0;
             u_waitpid(pid, &status, 0);
             u_print("[Program finished with exit code ");

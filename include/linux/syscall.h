@@ -11,6 +11,7 @@
 #define __NR_open    5
 #define __NR_close   6
 #define __NR_waitpid 7
+#define __NR_unlink  10
 #define __NR_execve  11
 #define __NR_time    13
 #define __NR_getpid  20
