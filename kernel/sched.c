@@ -1,8 +1,8 @@
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/mm.h>
+#include <linux/gdt.h>
 
-/* Процесс 0 (Task 0 / Idle) */
 static union task_union init_task = {
     .task = {
         .rsp = 0,
@@ -24,20 +24,19 @@ void sched_init(void)
     for (int i = 1; i < NR_TASKS; i++) {
         task[i] = NULL;
     }
+    set_tss_stack((uint64_t)&init_task + PAGE_SIZE);
     printk("[OK] Scheduler Initialized: Task 0 (Idle) is active\n");
 }
 
-/* Создание нового фонового потока ядра */
 int task_create(void (*fn)(void), long priority)
 {
     int i;
     for (i = 1; i < NR_TASKS; i++) {
         if (!task[i]) break;
     }
-    if (i == NR_TASKS) return -1; /* Нет свободных слотов */
+    if (i == NR_TASKS) return -1;
 
-        /* Выделяем страницу памяти под task_union */
-        uint64_t page = get_free_page();
+    uint64_t page = get_free_page();
     if (!page) return -1;
 
     union task_union *u = (union task_union *)page;
@@ -45,32 +44,27 @@ int task_create(void (*fn)(void), long priority)
     u->task.priority = priority;
     u->task.counter = priority;
     u->task.pid = i;
-    u->task.cr3 = 0; /* Разделяет пространство ядра */
+    u->task.cr3 = 0;
 
-    /*
-     * Формируем начальный стек процесса:
-     * Выравниваем вершину стека с учетом требований x86_64 ABI (RSP % 16 == 8 при входе в C-функцию)
-     */
     uint64_t stack_top = page + PAGE_SIZE - 8;
     uint64_t *sp = (uint64_t *)stack_top;
 
-    *(--sp) = (uint64_t)fn;    /* RIP для инструкции ret */
-    *(--sp) = 0x202ULL;        /* RFLAGS: прерывания включены (IF=1) */
-    *(--sp) = 0;               /* RBX */
-    *(--sp) = 0;               /* RBP */
-    *(--sp) = 0;               /* R12 */
-    *(--sp) = 0;               /* R13 */
-    *(--sp) = 0;               /* R14 */
-    *(--sp) = 0;               /* R15 */
+    *(--sp) = (uint64_t)fn;
+    *(--sp) = 0x202ULL;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
+    *(--sp) = 0;
 
     u->task.rsp = (uint64_t)sp;
     task[i] = &(u->task);
 
-    printk("[OK] Created Task PID %d (Priority %d, Stack %p)\n", i, priority, sp);
+    printk("[OK] Created Task PID %d (Priority %d)\n", i, priority);
     return i;
 }
 
-/* Классический алгоритм Торвальдса из Linux 0.01 */
 void schedule(void)
 {
     int i, next, c;
@@ -90,7 +84,6 @@ void schedule(void)
             }
         }
         if (c) break;
-        /* Если у всех активных задач counter == 0, пересчитываем приоритеты */
         for (p = &task[NR_TASKS - 1]; p >= &task[0]; --p) {
             if (*p) {
                 (*p)->counter = ((*p)->counter >> 1) + (*p)->priority;
@@ -101,11 +94,14 @@ void schedule(void)
     if (current != task[next]) {
         struct task_struct *prev = current;
         current = task[next];
+
+        /* Обновляем вершину стека ядра в TSS для прерываний из Ring 3 */
+        set_tss_stack((uint64_t)current + PAGE_SIZE);
+
         switch_to(prev, task[next]);
     }
 }
 
-/* Вызывается таймером PIT (100 раз в секунду) */
 void do_timer(void)
 {
     if (--current->counter > 0)

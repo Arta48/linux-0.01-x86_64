@@ -1,5 +1,5 @@
 /*
- * boot/boot.S -- Точка входа x86_64 с инициализацией FPU/SSE
+ * boot/boot.S -- Добавлен флаг User (0x4) для таблиц страниц
  */
 
 .set MULTIBOOT_MAGIC,    0x1BADB002
@@ -41,20 +41,20 @@ _start:
     cld
     movl $stack_top, %esp
 
-    /* 1. Настройка таблиц страниц (1 ГБ Identity Mapping) */
+    /* 1. Настройка таблиц с битом User (0x7 = Present | Writable | User) */
     movl $pdpt_table, %eax
-    orl  $0x3, %eax
+    orl  $0x7, %eax
     movl %eax, pml4_table
 
     movl $pd_table, %eax
-    orl  $0x3, %eax
+    orl  $0x7, %eax
     movl %eax, pdpt_table
 
     movl $0, %ecx
 set_pd_entries:
     movl $0x200000, %eax
     mull %ecx
-    orl  $0x83, %eax
+    orl  $0x87, %eax                  /* 0x87 = Present | Writable | User | 2MB Huge */
     movl %eax, pd_table(, %ecx, 8)
     incl %ecx
     cmpl $512, %ecx
@@ -63,18 +63,18 @@ set_pd_entries:
     movl $pml4_table, %eax
     movl %eax, %cr3
 
-    /* 2. Включаем PAE (бит 5), а также OSFXSR (бит 9) и OSXMMEXCPT (бит 10) для SSE */
+    /* 2. Включаем PAE, OSFXSR и OSXMMEXCPT */
     movl %cr4, %eax
     orl  $((1 << 5) | (1 << 9) | (1 << 10)), %eax
     movl %eax, %cr4
 
-    /* 3. Очищаем CR0.EM (бит 2) и включаем CR0.MP (бит 1) */
+    /* 3. Очищаем CR0.EM, включаем CR0.MP */
     movl %cr0, %eax
     andl $~(1 << 2), %eax
     orl  $(1 << 1), %eax
     movl %eax, %cr0
 
-    /* 4. Включаем Long Mode (бит 8 LME) в EFER MSR */
+    /* 4. Включаем Long Mode (бит 8 LME) */
     movl $0xC0000080, %ecx
     rdmsr
     orl  $(1 << 8), %eax
@@ -85,7 +85,7 @@ set_pd_entries:
     orl  $(1 << 31) | (1 << 0), %eax
     movl %eax, %cr0
 
-    /* 6. Загружаем 64-битную GDT */
+    /* 6. Загружаем временную GDT */
     lgdt gdt64_desc
     ljmp $0x08, $long_mode_entry
 

@@ -52,7 +52,7 @@ A modern reimplementation of Linus Torvalds' historic **Linux 0.01** kernel (rel
   - Программное переключение контекста в `kernel/switch.S` (подмена `%rsp` и регистров ABI).
   - Оригинальный алгоритм планировщика Линуса (`counter` / `priority`).
   - Вытесняющая многозадачность по тикам таймера (`do_timer`).
-- [ ] **Stage 5: System Calls & Ring 3 User Space**
+- [x] **Stage 5: System Calls & Ring 3 User Space**
   - Настройка MSR-регистров для аппаратных вызовов `syscall` / `sysret`.
   - Изоляция адресного пространства через индивидуальные таблицы страниц (CR3).
   - Переход в пользовательский режим (Ring 3) и исполнение первого процесса `init`.

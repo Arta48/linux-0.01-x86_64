@@ -11,16 +11,15 @@ static unsigned short *vga = (unsigned short *)VGA_BUFFER;
 static int cursor_x = 0;
 static int cursor_y = 0;
 
-/* Инициализация COM-порта для вывода в терминал */
 static void serial_init(void)
 {
-    outb(0x00, COM1 + 1);    /* Отключаем прерывания */
-    outb(0x80, COM1 + 3);    /* Включаем DLAB (установка битрейта) */
-    outb(0x03, COM1 + 0);    /* Делитель 3 (38400 бод) */
     outb(0x00, COM1 + 1);
-    outb(0x03, COM1 + 3);    /* 8 бит, без четности, 1 стоп-бит */
-    outb(0xC7, COM1 + 2);    /* Включаем FIFO */
-    outb(0x0B, COM1 + 4);    /* Включаем IRQ */
+    outb(0x80, COM1 + 3);
+    outb(0x03, COM1 + 0);
+    outb(0x00, COM1 + 1);
+    outb(0x03, COM1 + 3);
+    outb(0xC7, COM1 + 2);
+    outb(0x0B, COM1 + 4);
 }
 
 static void serial_putc(char c)
@@ -32,7 +31,6 @@ static void serial_putc(char c)
 void console_init(void)
 {
     serial_init();
-    /* Очистка экрана */
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
         vga[i] = (0x07 << 8) | ' ';
     }
@@ -40,9 +38,9 @@ void console_init(void)
     cursor_y = 0;
 }
 
-static void console_putc(char c)
+void console_putc(char c)
 {
-    serial_putc(c); /* Дублируем в серийный порт */
+    serial_putc(c);
 
     if (c == '\n') {
         cursor_x = 0;
@@ -50,7 +48,7 @@ static void console_putc(char c)
     } else if (c == '\r') {
         cursor_x = 0;
     } else {
-        vga[cursor_y * VGA_WIDTH + cursor_x] = (0x0A << 8) | c; /* Светло-зеленый текст */
+        vga[cursor_y * VGA_WIDTH + cursor_x] = (0x0A << 8) | c;
         cursor_x++;
         if (cursor_x >= VGA_WIDTH) {
             cursor_x = 0;
@@ -59,7 +57,6 @@ static void console_putc(char c)
     }
 
     if (cursor_y >= VGA_HEIGHT) {
-        /* Простая прокрутка экрана */
         for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
             vga[i] = vga[i + VGA_WIDTH];
         }
@@ -101,6 +98,11 @@ void printk(const char *fmt, ...)
         }
         p++;
         switch (*p) {
+            case 'c': {
+                char c = (char)va_arg(args, int);
+                console_putc(c);
+                break;
+            }
             case 's': {
                 const char *s = va_arg(args, const char *);
                 while (*s) console_putc(*s++);
