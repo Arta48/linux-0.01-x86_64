@@ -29,9 +29,13 @@ struct task_struct {
     uint64_t start_brk;
     uint64_t brk;
     char cwd[64];
-    uint32_t signal;           /* Битовая маска ожидающих сигналов */
-    uint64_t sig_fn[32];       /* Таблица адресов обработчиков сигналов в Ring 3 */
-    uint64_t alarm;            /* Таймаут сна (в тиках jiffies) */
+    uint16_t uid;              /* Идентификатор пользователя */
+    uint16_t euid;             /* Эффективный UID */
+    uint16_t gid;              /* Идентификатор группы */
+    uint16_t egid;             /* Эффективный GID */
+    uint32_t signal;
+    uint64_t sig_fn[32];
+    uint64_t alarm;
     struct file filp[NR_OPEN];
 };
 

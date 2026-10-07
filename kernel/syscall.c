@@ -5,8 +5,8 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/string.h>
-#include <linux/time.h>
 #include <linux/utsname.h>
+#include <linux/time.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -51,7 +51,6 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
         while (bytes_read < count) {
             __asm__ volatile ("sti");
 
-            /* Если поступил сигнал (например Ctrl+C), немедленно прерываем чтение */
             if (current->signal) {
                 return -1;
             }
@@ -127,6 +126,25 @@ static int64_t sys_getpid(void)
     return current->pid;
 }
 
+static int64_t sys_getuid(void)
+{
+    return (int64_t)current->uid;
+}
+
+static int64_t sys_setuid(uint16_t uid)
+{
+    /* Только root (euid == 0) может менять UID */
+    if (current->euid == 0) {
+        current->uid = uid;
+        current->euid = uid;
+        return 0;
+    }
+    if (uid == current->uid) {
+        return 0;
+    }
+    return -1; /* Permission denied */
+}
+
 static int64_t sys_time(void)
 {
     return (int64_t)get_current_time();
@@ -134,15 +152,15 @@ static int64_t sys_time(void)
 
 static void sys_ps(void)
 {
-    printk("\nPID   PPID  STATE       PRIORITY  COUNTER\n");
+    printk("\nPID   PPID  UID   STATE       PRIORITY  COUNTER\n");
     for (int i = 0; i < NR_TASKS; i++) {
         if (task[i]) {
             const char *st = "UNKNOWN";
             if (task[i]->state == TASK_RUNNING) st = "RUNNING";
             else if (task[i]->state == TASK_INTERRUPTIBLE) st = "SLEEP  ";
             else if (task[i]->state == TASK_ZOMBIE) st = "ZOMBIE ";
-            printk("%d     %d     %s     %d        %d\n",
-                   task[i]->pid, task[i]->father, st, task[i]->priority, task[i]->counter);
+            printk("%d     %d     %d     %s     %d        %d\n",
+                   task[i]->pid, task[i]->father, task[i]->uid, st, task[i]->priority, task[i]->counter);
         }
     }
     printk("\n");
@@ -183,7 +201,6 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
     }
 
     if (has_children) {
-        /* WNOHANG: не ждем, если процесс еще работает */
         if (options & 1) {
             return 0;
         }
@@ -209,7 +226,6 @@ static int64_t sys_kill(int64_t pid, int sig)
     return 0;
 }
 
-/* sys_signal: регистрация пользовательского обработчика сигнала */
 static int64_t sys_signal(int sig, uint64_t handler)
 {
     if (sig <= 0 || sig >= 32 || sig == SIGKILL) {
@@ -301,23 +317,6 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     return 0;
 }
 
-int64_t sys_exit(int status)
-{
-    printk("\n[Process %d exited with status %d]\n", (int)current->pid, status);
-
-    for (int i = 0; i < NR_OPEN; i++) {
-        if (current->filp[i].in_use) {
-            sys_close(i);
-        }
-    }
-
-    current->exit_code = status;
-    current->state = TASK_ZOMBIE;
-    schedule();
-    for (;;);
-    return 0;
-}
-
 static int64_t sys_uname(struct utsname *name)
 {
     if (!name) return -1;
@@ -334,6 +333,23 @@ static int64_t sys_uname(struct utsname *name)
     memcpy(name->version,  s_version, strlen(s_version) + 1);
     memcpy(name->machine,  s_machine, strlen(s_machine) + 1);
 
+    return 0;
+}
+
+int64_t sys_exit(int status)
+{
+    printk("\n[Process %d exited with status %d]\n", (int)current->pid, status);
+
+    for (int i = 0; i < NR_OPEN; i++) {
+        if (current->filp[i].in_use) {
+            sys_close(i);
+        }
+    }
+
+    current->exit_code = status;
+    current->state = TASK_ZOMBIE;
+    schedule();
+    for (;;);
     return 0;
 }
 
@@ -362,6 +378,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_unlink:
             ret = sys_unlink((const char *)arg1);
             break;
+        case __NR_chmod:
+            ret = sys_chmod((const char *)arg1, (int)arg2);
+            break;
         case __NR_dup2:
             ret = sys_dup2((int)arg1, (int)arg2);
             break;
@@ -386,6 +405,12 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_getpid:
             ret = sys_getpid();
             break;
+        case __NR_getuid:
+            ret = sys_getuid();
+            break;
+        case __NR_setuid:
+            ret = sys_setuid((uint16_t)arg1);
+            break;
         case __NR_time:
             ret = sys_time();
             break;
@@ -394,7 +419,6 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             ret = 0;
             break;
         case __NR_list:
-            /* ЧЕСТНЫЙ 4-й АРГУМЕНТ arg4 (is_long: 0 или 1) */
             ret = sys_list((const char *)arg1, (char *)arg2, arg3, (int)arg4);
             break;
         case __NR_waitpid:
@@ -424,7 +448,6 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             break;
     }
 
-    /* Проверка и доставка сигналов перед возвратом в Ring 3 */
     if (current->signal && current->pid > 0) {
         for (int sig = 1; sig < 32; sig++) {
             if (current->signal & (1U << sig)) {

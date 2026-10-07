@@ -51,19 +51,15 @@ struct proc_ram_file {
 
 static struct proc_ram_file ram_files[MAX_FILES];
 
-/* Аппаратный опрос модели процессора через CPUID */
 static void get_cpu_info(char *vendor, char *brand)
 {
     uint32_t eax, ebx, ecx, edx;
-
-    /* Leaf 0: Vendor String */
     __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
     memcpy(vendor, &ebx, 4);
     memcpy(vendor + 4, &edx, 4);
     memcpy(vendor + 8, &ecx, 4);
     vendor[12] = '\0';
 
-    /* Leaf 0x80000000..0x80000004: Processor Brand String */
     __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0x80000000));
     if (eax >= 0x80000004) {
         uint32_t *b = (uint32_t *)brand;
@@ -72,8 +68,6 @@ static void get_cpu_info(char *vendor, char *brand)
             b += 4;
         }
         brand[48] = '\0';
-
-        /* Убираем начальные пробелы */
         char *p = brand;
         while (*p == ' ') p++;
         if (p != brand) {
@@ -85,7 +79,6 @@ static void get_cpu_info(char *vendor, char *brand)
     }
 }
 
-/* Генератор /proc/cpuinfo */
 static void generate_cpuinfo(char *buf, uint64_t max_len)
 {
     char vendor[16];
@@ -108,7 +101,6 @@ static void generate_cpuinfo(char *buf, uint64_t max_len)
     buf[o] = '\0';
 }
 
-/* Генератор /proc/meminfo */
 static void generate_meminfo(char *buf, uint64_t max_len)
 {
     uint32_t free_p = get_free_pages_count();
@@ -117,25 +109,24 @@ static void generate_meminfo(char *buf, uint64_t max_len)
     uint64_t used_kb = total_kb - free_kb;
 
     uint64_t o = 0;
-
     const char *s1 = "MemTotal:\t";
     while (*s1) buf[o++] = *s1++;
-    char nb[16]; int ni = 0; uint64_t v = total_kb;
-    while (v > 0) { nb[ni++] = '0' + (v % 10); v /= 10; }
+    char nb[16]; int ni = 0; uint64_t val = total_kb;
+    while (val > 0) { nb[ni++] = '0' + (val % 10); val /= 10; }
     while (--ni >= 0) buf[o++] = nb[ni];
     const char *kb = " kB\nMemFree:\t";
     while (*kb) buf[o++] = *kb++;
 
-    ni = 0; v = free_kb;
-    if (v == 0) nb[ni++] = '0';
-    while (v > 0) { nb[ni++] = '0' + (v % 10); v /= 10; }
+    ni = 0; val = free_kb;
+    if (val == 0) nb[ni++] = '0';
+    while (val > 0) { nb[ni++] = '0' + (val % 10); val /= 10; }
     while (--ni >= 0) buf[o++] = nb[ni];
     const char *s2 = " kB\nMemUsed:\t";
     while (*s2) buf[o++] = *s2++;
 
-    ni = 0; v = used_kb;
-    if (v == 0) nb[ni++] = '0';
-    while (v > 0) { nb[ni++] = '0' + (v % 10); v /= 10; }
+    ni = 0; val = used_kb;
+    if (val == 0) nb[ni++] = '0';
+    while (val > 0) { nb[ni++] = '0' + (val % 10); val /= 10; }
     while (--ni >= 0) buf[o++] = nb[ni];
     const char *s3 = " kB\n";
     while (*s3 && o < max_len - 1) buf[o++] = *s3++;
@@ -196,13 +187,16 @@ void fs_init(void)
         ram_files[i].base.size = 0;
         ram_files[i].base.capacity = 0;
         ram_files[i].base.mtime = startup_time;
+        ram_files[i].base.uid = 0; /* root */
+        ram_files[i].base.gid = 0;
+        ram_files[i].base.mode = 0644;
         ram_files[i].base.is_readonly = 0;
         ram_files[i].base.is_dir = 0;
         ram_files[i].is_proc = 0;
         ram_files[i].generator = NULL;
     }
 
-    /* Системные каталоги: /, /bin, /etc, /home, /proc */
+    /* Системные каталоги */
     const char *dirs[] = { "/", "/bin", "/etc", "/home", "/proc" };
     for (int i = 0; i < 5; i++) {
         uint64_t len = strlen(dirs[i]);
@@ -211,11 +205,12 @@ void fs_init(void)
         ram_files[i].base.in_use = 1;
         ram_files[i].base.is_readonly = 1;
         ram_files[i].base.mtime = startup_time;
+        ram_files[i].base.mode = 0755;
     }
 
-    /* Статические файлы */
+    /* Системные файлы */
     const char *init_names[] = {
-        "/README.txt", "/version", "/author", "/etc/motd", "/bin/hello", "/bin/calc"
+        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/bin/hello", "/bin/calc"
     };
     const char *init_data[] = {
         "====================================================\n"
@@ -232,32 +227,34 @@ void fs_init(void)
         "  - Binary execution via fork() + execve()\n"
         "  - Signals & Ctrl+C interruption\n"
         "  - Real-Time Clock (CMOS RTC) & ls -l\n"
-        "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n",
+        "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n"
+        "  - Multi-user authentication: UID, GID, su, chmod\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
         "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
+        "root:x:0:0:Superuser:/root\nuser:x:1000:1000:Regular User:/home\nguest:x:1001:1001:Guest Account:/home\n",
         (const char *)bin_hello,
         (const char *)bin_calc
     };
 
-    uint64_t init_sizes[] = { 0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc) };
+    uint64_t init_sizes[] = { 0, 0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc) };
 
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         int idx = 5 + i;
         uint64_t nlen = strlen(init_names[i]);
         memcpy(ram_files[idx].base.name, init_names[i], nlen + 1);
         ram_files[idx].base.data = (char *)init_data[i];
-        ram_files[idx].base.size = (i < 4) ? strlen(init_data[i]) : init_sizes[i];
+        ram_files[idx].base.size = (i < 5) ? strlen(init_data[i]) : init_sizes[i];
         ram_files[idx].base.capacity = ram_files[idx].base.size;
         ram_files[idx].base.in_use = 1;
         ram_files[idx].base.is_readonly = 1;
         ram_files[idx].base.is_dir = 0;
         ram_files[idx].base.mtime = startup_time;
+        ram_files[idx].base.mode = (i >= 5) ? 0755 : 0644;
     }
 
-    /* Файлы /proc/cpuinfo и /proc/meminfo */
-    int c_idx = 11;
+    int c_idx = 12;
     memcpy(ram_files[c_idx].base.name, "/proc/cpuinfo", 14);
     ram_files[c_idx].base.data = (char *)get_free_page();
     ram_files[c_idx].base.capacity = PAGE_SIZE;
@@ -266,7 +263,7 @@ void fs_init(void)
     ram_files[c_idx].is_proc = 1;
     ram_files[c_idx].generator = generate_cpuinfo;
 
-    int m_idx = 12;
+    int m_idx = 13;
     memcpy(ram_files[m_idx].base.name, "/proc/meminfo", 14);
     ram_files[m_idx].base.data = (char *)get_free_page();
     ram_files[m_idx].base.capacity = PAGE_SIZE;
@@ -275,7 +272,7 @@ void fs_init(void)
     ram_files[m_idx].is_proc = 1;
     ram_files[m_idx].generator = generate_meminfo;
 
-    printk("[OK] ProcFS Initialized (/proc/cpuinfo, /proc/meminfo)\n");
+    printk("[OK] Multi-user VFS Initialized (/etc/passwd, root/user privileges)\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
@@ -327,6 +324,9 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].base.size = 0;
         ram_files[file_idx].base.capacity = PAGE_SIZE;
         ram_files[file_idx].base.mtime = get_current_time();
+        ram_files[file_idx].base.uid = current->euid; /* Назначаем владельца */
+        ram_files[file_idx].base.gid = current->egid;
+        ram_files[file_idx].base.mode = 0644;
         ram_files[file_idx].base.in_use = 1;
         ram_files[file_idx].base.is_readonly = 0;
         ram_files[file_idx].base.is_dir = 0;
@@ -349,7 +349,6 @@ int64_t sys_open(const char *filename, int flags)
             current->filp[fd].type = FILE_TYPE_REGULAR;
             current->filp[fd].rf   = (struct ram_file *)&ram_files[file_idx].base;
 
-            /* ПОДДЕРЖКА O_APPEND: пишем в конец файла! */
             if (flags & O_APPEND) {
                 current->filp[fd].pos = ram_files[file_idx].base.size;
             } else {
@@ -439,6 +438,11 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return -1;
     }
 
+    /* Проверка прав: писать может владелец или root (euid == 0) */
+    if (current->euid != 0 && current->euid != rf->uid) {
+        return -1; /* Permission denied */
+    }
+
     uint64_t bytes_to_write = count;
     if (f->pos + bytes_to_write > rf->capacity) {
         bytes_to_write = rf->capacity - f->pos;
@@ -468,6 +472,11 @@ int64_t sys_unlink(const char *filename)
                 return -1;
             }
 
+            /* Удалять может владелец или root */
+            if (current->euid != 0 && current->euid != ram_files[i].base.uid) {
+                return -1; /* Permission denied */
+            }
+
             if (ram_files[i].base.data) {
                 free_page((uint64_t)ram_files[i].base.data);
             }
@@ -476,6 +485,23 @@ int64_t sys_unlink(const char *filename)
             ram_files[i].base.name[0] = '\0';
             ram_files[i].base.data = NULL;
             ram_files[i].base.size = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int64_t sys_chmod(const char *filename, int mode)
+{
+    char full[MAX_FILENAME];
+    resolve_path(filename, full);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
+            if (current->euid != 0 && current->euid != ram_files[i].base.uid) {
+                return -1;
+            }
+            ram_files[i].base.mode = (uint16_t)mode;
             return 0;
         }
     }
@@ -517,6 +543,9 @@ int64_t sys_mkdir(const char *path)
             ram_files[i].base.is_readonly = 0;
             ram_files[i].base.size = 0;
             ram_files[i].base.mtime = get_current_time();
+            ram_files[i].base.uid = current->euid;
+            ram_files[i].base.gid = current->egid;
+            ram_files[i].base.mode = 0755;
             ram_files[i].base.data = NULL;
             ram_files[i].is_proc = 0;
             ram_files[i].generator = NULL;
@@ -537,6 +566,7 @@ int64_t sys_rmdir(const char *path)
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && ram_files[i].base.is_dir && strcmp(full, ram_files[i].base.name) == 0) {
             if (ram_files[i].base.is_readonly) return -1;
+            if (current->euid != 0 && current->euid != ram_files[i].base.uid) return -1;
             dir_idx = i;
             break;
         }
@@ -602,7 +632,6 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
             const char *display = (strcmp(target, "/") == 0) ? name + 1 : name + tlen + 1;
 
             if (is_long) {
-                /* ПОДРОБНЫЙ ВЫВОД (ls -l): права доступа, размер, имя */
                 const char *perms = ram_files[i].base.is_dir ? "drwxr-xr-x  " :
                 (ram_files[i].base.is_readonly ? "-rwxr-xr-x  " : "-rw-r--r--  ");
                 while (*perms && offset < max_len - 32) buf[offset++] = *perms++;
@@ -626,7 +655,6 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
                 if (ram_files[i].base.is_dir) buf[offset++] = '/';
                 buf[offset++] = '\n';
             } else {
-                /* КОМПАКТНЫЙ ВЫВОД (обычный ls): только имена файлов и папок */
                 while (*display && offset < max_len - 16) buf[offset++] = *display++;
                 if (ram_files[i].base.is_dir) {
                     buf[offset++] = '/';

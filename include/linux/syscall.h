@@ -15,9 +15,12 @@
 #define __NR_execve  11
 #define __NR_chdir   12
 #define __NR_time    13
+#define __NR_chmod   15
 #define __NR_getpid  20
 #define __NR_ps      21
 #define __NR_list    22
+#define __NR_setuid  23
+#define __NR_getuid  24
 #define __NR_pause   29
 #define __NR_kill    37
 #define __NR_mkdir   39

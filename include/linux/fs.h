@@ -43,6 +43,9 @@ struct ram_file {
     uint64_t size;
     uint64_t capacity;
     uint64_t mtime;
+    uint16_t uid;
+    uint16_t gid;
+    uint16_t mode;
     int in_use;
     int is_readonly;
     int is_dir;
@@ -63,6 +66,7 @@ int64_t sys_close(int fd);
 int64_t sys_file_read(int fd, char *buf, uint64_t count);
 int64_t sys_file_write(int fd, const char *buf, uint64_t count);
 int64_t sys_unlink(const char *filename);
+int64_t sys_chmod(const char *filename, int mode);
 int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long);
 
 int64_t sys_chdir(const char *path);

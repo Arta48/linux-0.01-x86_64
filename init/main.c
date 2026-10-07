@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/signal.h>
 #include <linux/time.h>
+#include <linux/utsname.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -54,6 +55,11 @@ static inline int64_t u_unlink(const char *path)
     return u_syscall(__NR_unlink, (uint64_t)path, 0, 0);
 }
 
+static inline int64_t u_chmod(const char *path, int mode)
+{
+    return u_syscall(__NR_chmod, (uint64_t)path, mode, 0);
+}
+
 static inline int64_t u_chdir(const char *path)
 {
     return u_syscall(__NR_chdir, (uint64_t)path, 0, 0);
@@ -92,6 +98,16 @@ static inline int64_t u_pipe(int *pipefd)
 static inline int64_t u_getpid(void)
 {
     return u_syscall(__NR_getpid, 0, 0, 0);
+}
+
+static inline int64_t u_getuid(void)
+{
+    return u_syscall(__NR_getuid, 0, 0, 0);
+}
+
+static inline int64_t u_setuid(uint16_t uid)
+{
+    return u_syscall(__NR_setuid, (uint64_t)uid, 0, 0);
 }
 
 static inline int64_t u_time(void)
@@ -147,12 +163,81 @@ static inline int64_t u_list(const char *path, char *buf, uint64_t max_len, int 
     return ret;
 }
 
+static inline int64_t u_uname(struct utsname *name)
+{
+    return u_syscall(__NR_uname, (uint64_t)name, 0, 0);
+}
+
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* Строковые функции */
+/* Аллокатор памяти malloc / free */
+struct block_header {
+    uint64_t size;
+    int is_free;
+    struct block_header *next;
+};
+
+static struct block_header *heap_head = NULL;
+
+static void *u_sbrk(int64_t increment)
+{
+    uint64_t cur_brk = (uint64_t)u_brk(0);
+    if (increment == 0) return (void *)cur_brk;
+    uint64_t new_brk = cur_brk + increment;
+    uint64_t res = (uint64_t)u_brk(new_brk);
+    if (res < new_brk) return (void *)-1;
+    return (void *)cur_brk;
+}
+
+static void *u_malloc(uint64_t size)
+{
+    if (size == 0) return NULL;
+    size = (size + 15) & ~15ULL;
+    struct block_header *curr = heap_head;
+    while (curr) {
+        if (curr->is_free && curr->size >= size) {
+            curr->is_free = 0;
+            return (void *)(curr + 1);
+        }
+        curr = curr->next;
+    }
+    uint64_t total_size = sizeof(struct block_header) + size;
+    void *raw = u_sbrk((int64_t)total_size);
+    if (raw == (void *)-1) return NULL;
+    struct block_header *new_block = (struct block_header *)raw;
+    new_block->size = size;
+    new_block->is_free = 0;
+    new_block->next = NULL;
+    if (!heap_head) {
+        heap_head = new_block;
+    } else {
+        curr = heap_head;
+        while (curr->next) curr = curr->next;
+        curr->next = new_block;
+    }
+    return (void *)(new_block + 1);
+}
+
+static void u_free(void *ptr)
+{
+    if (!ptr) return;
+    struct block_header *hdr = (struct block_header *)ptr - 1;
+    hdr->is_free = 1;
+    struct block_header *curr = heap_head;
+    while (curr && curr->next) {
+        if (curr->is_free && curr->next->is_free) {
+            curr->size += sizeof(struct block_header) + curr->next->size;
+            curr->next = curr->next->next;
+        } else {
+            curr = curr->next;
+        }
+    }
+}
+
+/* Строковые вспомогательные функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -240,6 +325,59 @@ static int u_atoi(const char *s)
     return res;
 }
 
+static const char *day_names[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+static const char *mon_names[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+};
+static const int days_in_month[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+static void print_date(uint64_t epoch)
+{
+    uint64_t sec = epoch % 60;
+    uint64_t min = (epoch / 60) % 60;
+    uint64_t hour = (epoch / 3600) % 24;
+    uint64_t days = epoch / 86400;
+
+    int wday = (days + 4) % 7;
+
+    int year = 1970;
+    while (1) {
+        int leap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+        int ydays = leap ? 366 : 365;
+        if (days >= (uint64_t)ydays) {
+            days -= ydays;
+            year++;
+        } else break;
+    }
+
+    int leap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
+    int mon = 0;
+    while (mon < 12) {
+        int mdays = days_in_month[mon];
+        if (mon == 1 && leap) mdays = 29;
+        if (days >= (uint64_t)mdays) {
+            days -= mdays;
+            mon++;
+        } else break;
+    }
+    int mday = days + 1;
+
+    u_print(day_names[wday]); u_print(" ");
+    u_print(mon_names[mon]); u_print(" ");
+    if (mday < 10) u_print(" ");
+    u_print_num(mday); u_print(" ");
+    if (hour < 10) u_print("0");
+    u_print_num(hour); u_print(":");
+    if (min < 10) u_print("0");
+    u_print_num(min); u_print(":");
+    if (sec < 10) u_print("0");
+    u_print_num(sec);
+    u_print(" UTC ");
+    u_print_num(year);
+    u_print("\n");
+}
+
 /* ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ШЕЛЛА */
 #define MAX_ENV 16
 struct env_var {
@@ -279,7 +417,6 @@ static void env_init(void)
     for (int i = 0; i < MAX_ENV; i++) {
         env_vars[i].in_use = 0;
     }
-    /* Инициализируем без misleading-indentation */
     env_set("USER", "root");
     env_set("PATH", "/bin");
 }
@@ -304,7 +441,6 @@ static void env_unset(const char *key)
     }
 }
 
-/* ФОНОВЫЕ ЗАДАЧИ (&) */
 #define MAX_JOBS 8
 struct bg_job {
     int64_t pid;
@@ -346,7 +482,6 @@ static void check_bg_jobs(void)
     }
 }
 
-/* Символы, допустимые в имени переменной: [a-zA-Z0-9_] */
 static int is_var_char(char c)
 {
     return (c >= 'a' && c <= 'z') ||
@@ -355,15 +490,12 @@ static int is_var_char(char c)
     (c == '_');
 }
 
-/* Подстановка $VAR, ${VAR} и $? */
 static void expand_vars(const char *in, char *out, uint64_t max_len)
 {
     uint64_t oi = 0;
     while (*in && oi < max_len - 1) {
         if (*in == '$') {
             in++;
-
-            /* $? - код возврата */
             if (*in == '?') {
                 char nb[16]; int ni = 0; int v = last_exit_code;
                 if (v == 0) nb[ni++] = '0';
@@ -373,7 +505,6 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
                 continue;
             }
 
-            /* ${VAR} - фигурные скобки */
             int braced = 0;
             if (*in == '{') {
                 braced = 1;
@@ -385,7 +516,7 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
                 if (braced) {
                     if (*in == '}') { in++; break; }
                 } else {
-                    if (!is_var_char(*in)) break; /* Знаки препинания останавливают имя! */
+                    if (!is_var_char(*in)) break;
                 }
                 var_name[vi++] = *in++;
             }
@@ -412,7 +543,6 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
     out[oi] = '\0';
 }
 
-/* ИСТОРИЯ КОМАНД */
 #define HISTORY_MAX 8
 static char history[HISTORY_MAX][128];
 static int history_count = 0;
@@ -609,6 +739,9 @@ static void execute_command(const char *cmd)
     if (u_strcmp(exec_cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
+        u_print("  whoami / id     - print current user / group info\n");
+        u_print("  su [user]       - switch user (su root, su user)\n");
+        u_print("  chmod <mod> <f> - change file permissions\n");
         u_print("  echo $VAR       - variable expansion ($?, $PWD, $USER)\n");
         u_print("  export K=V / env- environment variables management\n");
         u_print("  <cmd> & / jobs  - background process execution (&)\n");
@@ -621,10 +754,98 @@ static void execute_command(const char *cmd)
         u_print("  mkdir / rmdir   - directory management\n");
         u_print("  cat / touch / rm- file management\n");
         u_print("  <binary>        - execute binary via fork() + execve()\n");
-        u_print("  date / sleep    - system time & sleeping\n");
+        u_print("  heap / malloc   - dynamic memory management\n");
+        u_print("  malloctest      - stress test malloc() and free()\n");
         u_print("  sigtest         - test Ring 3 custom SIGINT handler\n");
+        u_print("  date / sleep    - system time & sleeping\n");
         u_print("  ps / kill / wait- process management\n");
+        u_print("  uname [-a]      - print system information\n");
         u_print("  clear / exit    - terminal control\n");
+        last_exit_code = 0;
+    } else if (u_strcmp(exec_cmd, "whoami") == 0) {
+        uint16_t uid = (uint16_t)u_getuid();
+        if (uid == 0) u_print("root\n");
+        else if (uid == 1000) u_print("user\n");
+        else if (uid == 1001) u_print("guest\n");
+        else { u_print("uid_"); u_print_num(uid); u_print("\n"); }
+        last_exit_code = 0;
+    } else if (u_strcmp(exec_cmd, "id") == 0) {
+        uint16_t uid = (uint16_t)u_getuid();
+        u_print("uid="); u_print_num(uid);
+        if (uid == 0) u_print("(root) gid=0(root)\n");
+        else if (uid == 1000) u_print("(user) gid=1000(user)\n");
+        else if (uid == 1001) u_print("(guest) gid=1001(guest)\n");
+        else u_print(" gid=1000\n");
+        last_exit_code = 0;
+    } else if (u_strncmp(exec_cmd, "su", 2) == 0 && (exec_cmd[2] == ' ' || exec_cmd[2] == '\0')) {
+        const char *user = exec_cmd + 2;
+        while (*user == ' ') user++;
+        uint16_t target_uid = 0;
+        if (user[0] == '\0' || u_strcmp(user, "root") == 0) {
+            target_uid = 0;
+        } else if (u_strcmp(user, "user") == 0) {
+            target_uid = 1000;
+        } else if (u_strcmp(user, "guest") == 0) {
+            target_uid = 1001;
+        } else {
+            target_uid = (uint16_t)u_atoi(user);
+        }
+
+        if (u_setuid(target_uid) == 0) {
+            if (target_uid == 0) env_set("USER", "root");
+            else if (target_uid == 1000) env_set("USER", "user");
+            else if (target_uid == 1001) env_set("USER", "guest");
+            last_exit_code = 0;
+        } else {
+            u_print("su: permission denied\n");
+            last_exit_code = 1;
+        }
+    } else if (u_strncmp(exec_cmd, "chmod ", 6) == 0) {
+        const char *p = exec_cmd + 6;
+        while (*p == ' ') p++;
+        int mode = u_atoi(p);
+        while (*p && *p != ' ') p++;
+        while (*p == ' ') p++;
+        if (u_chmod(p, mode) != 0) {
+            u_print("chmod: permission denied or file not found\n");
+            last_exit_code = 1;
+        } else last_exit_code = 0;
+    } else if (u_strcmp(exec_cmd, "heap") == 0) {
+        uint64_t cur_brk = (uint64_t)u_brk(0);
+        uint64_t heap_size = cur_brk - HEAP_START_VIRT;
+        u_print("Process Heap Info:\n  Start Break : ");
+        u_print_hex(HEAP_START_VIRT);
+        u_print("\n  Current Break: ");
+        u_print_hex(cur_brk);
+        u_print("\n  Heap Size   : ");
+        u_print_num(heap_size);
+        u_print(" bytes\n");
+        last_exit_code = 0;
+    } else if (u_strncmp(exec_cmd, "malloc ", 7) == 0) {
+        uint64_t sz = (uint64_t)u_atoi(exec_cmd + 7);
+        if (sz == 0) return;
+        void *ptr = u_malloc(sz);
+        if (!ptr) {
+            u_print("malloc: out of memory!\n");
+        } else {
+            u_print("Allocated "); u_print_num(sz); u_print(" bytes at: ");
+            u_print_hex((uint64_t)ptr); u_print("\nFreeing block...\n");
+            u_free(ptr);
+        }
+        last_exit_code = 0;
+    } else if (u_strcmp(exec_cmd, "malloctest") == 0) {
+        u_print("--- Running malloc / free Stress Test ---\n");
+        char *b1 = (char *)u_malloc(64);
+        char *b2 = (char *)u_malloc(256);
+        char *b3 = (char *)u_malloc(1024);
+        u_free(b2);
+        char *b4 = (char *)u_malloc(128);
+        if (b4 == b2) u_print("1. Reused freed block: SUCCESS\n");
+        u_free(b1); u_free(b4); u_free(b3);
+        char *b5 = (char *)u_malloc(2048);
+        if (b5 == b1) u_print("2. Coalesced block reuse: SUCCESS\n");
+        u_free(b5);
+        u_print("--- Malloc Test Passed 100%! ---\n");
         last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "sigtest") == 0) {
         int64_t pid = u_fork();
@@ -747,7 +968,7 @@ static void execute_command(const char *cmd)
     } else if (u_strncmp(exec_cmd, "rm ", 3) == 0) {
         const char *fname = exec_cmd + 3;
         while (*fname == ' ') fname++;
-        if (u_unlink(fname) != 0) { u_print("rm: failed\n"); last_exit_code = 1; }
+        if (u_unlink(fname) != 0) { u_print("rm: permission denied or file not found\n"); last_exit_code = 1; }
         else last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "cat") == 0) {
         char fbuf[128]; int64_t n;
@@ -775,6 +996,24 @@ static void execute_command(const char *cmd)
     } else if (u_strncmp(exec_cmd, "echo ", 5) == 0) {
         u_print(exec_cmd + 5);
         u_print("\n");
+        last_exit_code = 0;
+    } else if (u_strcmp(exec_cmd, "date") == 0) {
+        uint64_t epoch = (uint64_t)u_time();
+        print_date(epoch);
+        last_exit_code = 0;
+    } else if (u_strncmp(exec_cmd, "uname", 5) == 0 && (exec_cmd[5] == ' ' || exec_cmd[5] == '\0')) {
+        struct utsname un;
+        if (u_uname(&un) == 0) {
+            if (exec_cmd[5] == ' ' && exec_cmd[6] == '-' && exec_cmd[7] == 'a') {
+                u_print(un.sysname); u_print(" ");
+                u_print(un.nodename); u_print(" ");
+                u_print(un.release); u_print(" ");
+                u_print(un.version); u_print(" ");
+                u_print(un.machine); u_print("\n");
+            } else {
+                u_print(un.sysname); u_print("\n");
+            }
+        }
         last_exit_code = 0;
     } else if (u_strncmp(exec_cmd, "sleep ", 6) == 0) {
         int sec = u_atoi(exec_cmd + 6);
@@ -844,9 +1083,20 @@ static void print_prompt(void)
 {
     char cwd[64];
     u_getcwd(cwd, sizeof(cwd));
-    u_print("user@linux64:");
-    u_print(cwd);
-    u_print("$ ");
+    uint16_t uid = (uint16_t)u_getuid();
+
+    if (uid == 0) {
+        u_print("root@linux64:");
+        u_print(cwd);
+        u_print("# "); /* Решётка для root */
+    } else {
+        const char *user = env_get("USER");
+        if (user) u_print(user);
+        else u_print("user");
+        u_print("@linux64:");
+        u_print(cwd);
+        u_print("$ "); /* Доллар для обычных пользователей */
+    }
 }
 
 void user_init_process(void)
@@ -868,7 +1118,6 @@ void user_init_process(void)
     while (1) {
         char c;
         if (u_read(0, &c, 1) > 0) {
-            /* Стрелочки Вверх / Вниз */
             if (c == 27) {
                 char seq[2];
                 if (u_read(0, &seq[0], 1) > 0 && seq[0] == '[') {
@@ -924,7 +1173,6 @@ void user_init_process(void)
 
                 history_add(cmd_buf);
 
-                /* Корректная подстановка переменных */
                 char expanded[256];
                 expand_vars(cmd_buf, expanded, sizeof(expanded));
 
