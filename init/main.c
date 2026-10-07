@@ -77,6 +77,16 @@ static inline void u_ps(void)
     u_syscall(__NR_ps, 0, 0, 0);
 }
 
+static inline int64_t u_waitpid(int64_t pid, int *stat, int options)
+{
+    return u_syscall(__NR_waitpid, (uint64_t)pid, (uint64_t)stat, options);
+}
+
+static inline int64_t u_kill(int64_t pid, int sig)
+{
+    return u_syscall(__NR_kill, (uint64_t)pid, sig, 0);
+}
+
 static inline int64_t u_list(char *buf, uint64_t max_len)
 {
     return u_syscall(__NR_list, (uint64_t)buf, max_len, 0);
@@ -133,6 +143,16 @@ static int u_strncmp(const char *s1, const char *s2, uint64_t n)
     return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
+static int u_atoi(const char *s)
+{
+    int res = 0;
+    while (*s >= '0' && *s <= '9') {
+        res = res * 10 + (*s - '0');
+        s++;
+    }
+    return res;
+}
+
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') {
@@ -141,18 +161,21 @@ static void execute_command(const char *cmd)
 
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
-        u_print("  help        - show this help message\n");
-        u_print("  ls          - list files in root RamFS\n");
-        u_print("  cat <file>  - display file contents\n");
-        u_print("  pipe        - test Unix IPC pipe between processes\n");
-        u_print("  bench       - benchmark 'int 0x80' vs 'syscall'\n");
-        u_print("  fork        - test sys_fork() child creation\n");
-        u_print("  ps          - show running processes\n");
-        u_print("  uptime      - show system uptime\n");
-        u_print("  getpid      - show current process ID\n");
-        u_print("  clear       - clear the console screen\n");
-        u_print("  echo ..     - print arguments to console\n");
-        u_print("  exit        - terminate this shell process\n");
+        u_print("  help         - show this help message\n");
+        u_print("  ls           - list files in root RamFS\n");
+        u_print("  cat <file>   - display file contents\n");
+        u_print("  pipe         - test Unix IPC pipe (auto-reaped)\n");
+        u_print("  fork         - test fork and waitpid reaping\n");
+        u_print("  spawn        - spawn background infinite process\n");
+        u_print("  kill <pid>   - kill process by PID\n");
+        u_print("  wait         - reap zombie processes\n");
+        u_print("  ps           - show running processes\n");
+        u_print("  bench        - benchmark 'int 0x80' vs 'syscall'\n");
+        u_print("  uptime       - show system uptime\n");
+        u_print("  getpid       - show current process ID\n");
+        u_print("  clear        - clear the console screen\n");
+        u_print("  echo ..      - print arguments to console\n");
+        u_print("  exit         - terminate this shell process\n");
     } else if (u_strcmp(cmd, "pipe") == 0) {
         int pipefd[2];
         if (u_pipe(pipefd) < 0) {
@@ -168,18 +191,13 @@ static void execute_command(const char *cmd)
 
         int64_t pid = u_fork();
         if (pid == 0) {
-            /* ДОЧЕРНИЙ ПРОЦЕСС: пишет сообщение в канал */
-            u_close(pipefd[0]); /* Закрываем неиспользуемый конец чтения */
-
+            u_close(pipefd[0]);
             const char msg[] = ">>> [PIPE IPC] Secret message transmitted from Child to Parent through Pipe!\n";
             u_write(pipefd[1], msg, sizeof(msg) - 1);
-            u_close(pipefd[1]); /* Закрываем конец записи (сигнализирует EOF) */
-
+            u_close(pipefd[1]);
             u_exit(0);
         } else if (pid > 0) {
-            /* РОДИТЕЛЬСКИЙ ПРОЦЕСС: читает сообщение из канала */
-            u_close(pipefd[1]); /* Закрываем неиспользуемый конец записи */
-
+            u_close(pipefd[1]);
             char pbuf[128];
             int64_t n = u_read(pipefd[0], pbuf, sizeof(pbuf) - 1);
             if (n > 0) {
@@ -188,6 +206,78 @@ static void execute_command(const char *cmd)
                 u_print(pbuf);
             }
             u_close(pipefd[0]);
+
+            /* Утилизируем потомка через waitpid: освобождаем память */
+            int status = 0;
+            u_waitpid(pid, &status, 0);
+            u_print("[Parent] Reaped child PID ");
+            u_print_num(pid);
+            u_print(" successfully (status = ");
+            u_print_num(status);
+            u_print(")\n");
+        }
+    } else if (u_strcmp(cmd, "fork") == 0) {
+        int64_t pid = u_fork();
+
+        if (pid < 0) {
+            u_print("fork: failed to clone process!\n");
+        } else if (pid == 0) {
+            u_print("\n>>> [CHILD] Process successfully spawned! PID = ");
+            u_print_num(u_getpid());
+            u_print("\n>>> [CHILD] Simulating work for 2 seconds...\n");
+
+            uint64_t start = (uint64_t)u_time();
+            while ((uint64_t)u_time() - start < 200) {}
+
+            u_print(">>> [CHILD] Work finished. Calling sys_exit(0)...\n");
+            u_exit(0);
+        } else {
+            u_print("Parent spawned child with PID = ");
+            u_print_num(pid);
+            u_print(". Waiting for child to finish...\n");
+
+            int status = 0;
+            u_waitpid(pid, &status, 0);
+            u_print("[Parent] Child finished and reaped! Status = ");
+            u_print_num(status);
+            u_print("\n");
+        }
+    } else if (u_strcmp(cmd, "spawn") == 0) {
+        int64_t pid = u_fork();
+        if (pid == 0) {
+            while (1) {
+                /* Фоновый бесконечный процесс */
+                for (volatile int i = 0; i < 50000000; i++) {}
+            }
+        } else if (pid > 0) {
+            u_print("Spawned background infinite process with PID = ");
+            u_print_num(pid);
+            u_print(". Type 'ps' or 'kill <pid>'\n");
+        }
+    } else if (u_strncmp(cmd, "kill ", 5) == 0) {
+        int target_pid = u_atoi(cmd + 5);
+        if (target_pid <= 1) {
+            u_print("kill: cannot kill system processes!\n");
+        } else {
+            if (u_kill(target_pid, 9) == 0) {
+                u_print("Killed process ");
+                u_print_num(target_pid);
+                u_print("\n");
+            } else {
+                u_print("kill: process not found or already dead\n");
+            }
+        }
+    } else if (u_strcmp(cmd, "wait") == 0) {
+        int status = 0;
+        int64_t reaped = u_waitpid(-1, &status, 0);
+        if (reaped > 0) {
+            u_print("Reaped zombie process PID = ");
+            u_print_num(reaped);
+            u_print(" (status = ");
+            u_print_num(status);
+            u_print(")\n");
+        } else {
+            u_print("wait: no zombie children to reap\n");
         }
     } else if (u_strcmp(cmd, "ls") == 0) {
         char buf[512];
@@ -232,29 +322,6 @@ static void execute_command(const char *cmd)
         u_print(" jiffies\n  Fast   'syscall'  : ");
         u_print_num(time_fast);
         u_print(" jiffies\n");
-    } else if (u_strcmp(cmd, "fork") == 0) {
-        int64_t pid = u_fork();
-
-        if (pid < 0) {
-            u_print("fork: failed to clone process!\n");
-        } else if (pid == 0) {
-            u_print("\n>>> [CHILD] Process successfully spawned!\n");
-            u_print(">>> [CHILD] My PID is: ");
-            u_print_num(u_getpid());
-            u_print("\n>>> [CHILD] Simulating work for 2 seconds...\n");
-
-            uint64_t start = (uint64_t)u_time();
-            while ((uint64_t)u_time() - start < 200) {
-                /* Ждем 2 сек */
-            }
-
-            u_print(">>> [CHILD] Work finished. Calling sys_exit(0)...\n");
-            u_exit(0);
-        } else {
-            u_print("Parent spawned child with PID = ");
-            u_print_num(pid);
-            u_print("\n");
-        }
     } else if (u_strcmp(cmd, "ps") == 0) {
         u_ps();
     } else if (u_strcmp(cmd, "uptime") == 0) {

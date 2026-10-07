@@ -14,13 +14,16 @@
 #define TASK_STOPPED         4
 
 struct task_struct {
-    uint64_t rsp;          /* Смещение 0: стек ядра */
-    uint64_t cr3;          /* Смещение 8: CR3 */
+    uint64_t rsp;              /* Смещение 0: стек ядра */
+    uint64_t cr3;              /* Смещение 8: CR3 */
     long state;
     long counter;
     long priority;
     long pid;
-    struct file filp[NR_OPEN]; /* Таблица открытых файлов процесса */
+    long father;               /* PID родительского процесса */
+    int exit_code;             /* Код завершения процесса */
+    uint64_t user_stack_page;  /* Физическая страница пользовательского стека */
+    struct file filp[NR_OPEN];
 };
 
 union task_union {

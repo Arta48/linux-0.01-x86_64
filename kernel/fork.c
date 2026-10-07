@@ -31,6 +31,8 @@ int64_t sys_fork(struct trap_frame *tf)
 
     *child = *current;
     child->pid = new_pid;
+    child->father = current->pid; /* Запоминаем родителя */
+    child->exit_code = 0;
     child->state = TASK_RUNNING;
     child->counter = child->priority;
 
@@ -50,6 +52,8 @@ int64_t sys_fork(struct trap_frame *tf)
         return -1;
     }
     memcpy((void *)child_user_stack_page, (void *)parent_user_stack_page, PAGE_SIZE);
+
+    child->user_stack_page = child_user_stack_page; /* Привязываем страницу для освобождения */
 
     int64_t stack_offset = child_user_stack_page - parent_user_stack_page;
 
