@@ -6,7 +6,8 @@ CFLAGS = -Wall -Wextra -O2 -m64 -mcmodel=kernel -ffreestanding \
 LD = ld
 LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 
-OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o kernel/traps.o mm/memory.o
+OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
+       kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o
 
 all: Image
 
@@ -16,6 +17,9 @@ boot/boot.o: boot/boot.S
 kernel/asm.o: kernel/asm.S
 	$(CC) $(CFLAGS) -c kernel/asm.S -o kernel/asm.o
 
+kernel/switch.o: kernel/switch.S
+	$(CC) $(CFLAGS) -c kernel/switch.S -o kernel/switch.o
+
 init/main.o: init/main.c
 	$(CC) $(CFLAGS) -c init/main.c -o init/main.o
 
@@ -24,6 +28,9 @@ kernel/console.o: kernel/console.c
 
 kernel/traps.o: kernel/traps.c
 	$(CC) $(CFLAGS) -c kernel/traps.c -o kernel/traps.o
+
+kernel/sched.o: kernel/sched.c
+	$(CC) $(CFLAGS) -c kernel/sched.c -o kernel/sched.o
 
 mm/memory.o: mm/memory.c
 	$(CC) $(CFLAGS) -c mm/memory.c -o mm/memory.o

@@ -1,5 +1,6 @@
 #include <linux/traps.h>
 #include <linux/tty.h>
+#include <linux/sched.h>
 #include <asm/io.h>
 
 #define PIC1_CMD  0x20
@@ -98,11 +99,16 @@ void isr_handler(struct trap_frame *tf)
     if (tf->int_no >= 32 && tf->int_no < 48) {
         if (tf->int_no == 32) {
             jiffies++;
+            /* 1. Сначала подтверждаем прерывание контроллеру PIC */
+            outb(0x20, 0x20);
+            /* 2. Затем передаем управление планировщику */
+            do_timer();
+            return;
         }
         if (tf->int_no >= 40) {
-            outb(0x20, PIC2_CMD);
+            outb(0x20, 0xA0);
         }
-        outb(0x20, PIC1_CMD);
+        outb(0x20, 0x20);
         return;
     }
 
@@ -113,7 +119,6 @@ void isr_handler(struct trap_frame *tf)
         printk("\n================ KERNEL PANIC ================\n");
         printk("CPU EXCEPTION #%d: %s\n", tf->int_no, exceptions[tf->int_no]);
 
-        /* Если это Page Fault, считываем CR2 */
         if (tf->int_no == 14) {
             uint64_t cr2;
             __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
