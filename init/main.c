@@ -8,6 +8,13 @@
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
 /* Обертки системных вызовов Ring 3 */
+static inline int64_t u_fork(void)
+{
+    int64_t ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(__NR_fork) : "memory");
+    return ret;
+}
+
 static inline int64_t u_read(int fd, char *buf, uint64_t count)
 {
     int64_t ret;
@@ -46,12 +53,17 @@ static inline int64_t u_time(void)
     return ret;
 }
 
+static inline void u_ps(void)
+{
+    __asm__ volatile ("int $0x80" : : "a"(__NR_ps) : "memory");
+}
+
 static inline void u_exit(int status)
 {
     __asm__ volatile ("int $0x80" : : "a"(__NR_exit), "b"(status) : "memory");
 }
 
-/* Строковые вспомогательные функции для Ring 3 */
+/* Строковые функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -101,17 +113,44 @@ static int u_strncmp(const char *s1, const char *s2, uint64_t n)
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') {
-        return; /* Пустая строка */
+        return;
     }
 
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help    - show this help message\n");
+        u_print("  fork    - test sys_fork() child creation\n");
+        u_print("  ps      - show running processes\n");
         u_print("  uptime  - show system uptime\n");
         u_print("  getpid  - show current process ID\n");
         u_print("  clear   - clear the console screen\n");
         u_print("  echo .. - print arguments to console\n");
         u_print("  exit    - terminate this shell process\n");
+    } else if (u_strcmp(cmd, "fork") == 0) {
+        int64_t pid = u_fork();
+
+        if (pid < 0) {
+            u_print("fork: failed to clone process!\n");
+        } else if (pid == 0) {
+            /* ДОЧЕРНИЙ ПРОЦЕСС В RING 3 */
+            u_print("\n>>> [CHILD] Process successfully spawned!\n");
+            u_print(">>> [CHILD] My PID is: ");
+            u_print_num(u_getpid());
+            u_print("\n>>> [CHILD] Simulating work for 2 seconds...\n");
+
+            uint64_t start = (uint64_t)u_time();
+            while ((uint64_t)u_time() - start < 200); /* 200 тиков = 2 сек */
+
+                u_print(">>> [CHILD] Work finished. Calling sys_exit(0)...\n");
+            u_exit(0);
+        } else {
+            /* РОДИТЕЛЬСКИЙ ПРОЦЕСС В RING 3 */
+            u_print("Parent spawned child with PID = ");
+            u_print_num(pid);
+            u_print("\n");
+        }
+    } else if (u_strcmp(cmd, "ps") == 0) {
+        u_ps();
     } else if (u_strcmp(cmd, "uptime") == 0) {
         uint64_t ticks = (uint64_t)u_time();
         uint64_t sec = ticks / 100;
@@ -139,9 +178,6 @@ static void execute_command(const char *cmd)
     }
 }
 
-/*
- * ИНТЕРАКТИВНЫЙ КОМАНДНЫЙ ИНТЕРПРЕТАТОР В RING 3
- */
 void user_init_process(void)
 {
     const char banner[] =
@@ -160,7 +196,6 @@ void user_init_process(void)
     while (1) {
         char c;
         if (u_read(0, &c, 1) > 0) {
-            /* ЗАЩИТА ПРИГЛАШЕНИЯ: стираем, только если буфер не пуст! */
             if (c == '\b') {
                 if (buf_len > 0) {
                     buf_len--;

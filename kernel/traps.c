@@ -112,7 +112,7 @@ void isr_handler(struct trap_frame *tf)
 {
     /* Системный вызов int 0x80 */
     if (tf->int_no == 128) {
-        tf->rax = syscall_dispatcher(tf->rax, tf->rbx, tf->rcx, tf->rdx);
+        tf->rax = syscall_dispatcher(tf->rax, tf->rbx, tf->rcx, tf->rdx, tf);
         return;
     }
 

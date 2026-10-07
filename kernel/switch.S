@@ -1,12 +1,12 @@
 /*
- * kernel/switch.S -- Программное переключение контекста для x86_64
+ * kernel/switch.S -- Переключение задач и первый запуск ребенка (ret_from_fork)
  */
 
 .code64
 .globl switch_to
+.globl ret_from_fork
 
 switch_to:
-    /* 1. Сохраняем регистры текущего процесса в его стек */
     pushfq
     pushq %rbx
     pushq %rbp
@@ -15,13 +15,9 @@ switch_to:
     pushq %r14
     pushq %r15
 
-    /* 2. Сохраняем текущий RSP в prev->rsp (смещение 0) */
     movq %rsp, 0(%rdi)
-
-    /* 3. Загружаем новый RSP из next->rsp (смещение 0) */
     movq 0(%rsi), %rsp
 
-    /* 4. При необходимости переключаем таблицы страниц (смещение 8 - cr3) */
     movq 8(%rsi), %rax
     testq %rax, %rax
     jz 1f
@@ -30,7 +26,6 @@ switch_to:
     je 1f
     movq %rax, %cr3
 1:
-    /* 5. Восстанавливаем регистры нового процесса из его стека */
     popq %r15
     popq %r14
     popq %r13
@@ -38,6 +33,27 @@ switch_to:
     popq %rbp
     popq %rbx
     popfq
-
-    /* 6. Прыжок в новый процесс! */
     ret
+
+/*
+ * Первый запуск клонированного процесса:
+ * RSP указывает на скопированный struct trap_frame ребенка
+ */
+ret_from_fork:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp      /* Пропускаем int_no и error_code */
+    iretq               /* Возврат в Ring 3 с RAX = 0 */

@@ -4,6 +4,7 @@
 #include <linux/keyboard.h>
 
 extern volatile uint64_t jiffies;
+extern int64_t sys_fork(struct trap_frame *tf);
 
 static int64_t sys_read(int fd, char *buf, uint64_t count)
 {
@@ -50,6 +51,21 @@ static int64_t sys_time(void)
     return (int64_t)jiffies;
 }
 
+static void sys_ps(void)
+{
+    printk("\nPID   STATE       PRIORITY  COUNTER\n");
+    for (int i = 0; i < NR_TASKS; i++) {
+        if (task[i]) {
+            const char *st = "UNKNOWN";
+            if (task[i]->state == TASK_RUNNING) st = "RUNNING";
+            else if (task[i]->state == TASK_ZOMBIE) st = "ZOMBIE ";
+            printk("%d     %s     %d        %d\n",
+                   task[i]->pid, st, task[i]->priority, task[i]->counter);
+        }
+    }
+    printk("\n");
+}
+
 static int64_t sys_exit(int status)
 {
     printk("\n[Process %d exited with status %d]\n", current->pid, status);
@@ -59,9 +75,11 @@ static int64_t sys_exit(int status)
     return 0;
 }
 
-int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, struct trap_frame *tf)
 {
     switch (nr) {
+        case __NR_fork:
+            return sys_fork(tf);
         case __NR_read:
             return sys_read((int)arg1, (char *)arg2, arg3);
         case __NR_write:
@@ -70,6 +88,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             return sys_getpid();
         case __NR_time:
             return sys_time();
+        case __NR_ps:
+            sys_ps();
+            return 0;
         case __NR_exit:
             return sys_exit((int)arg1);
         default:
