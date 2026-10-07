@@ -11,11 +11,12 @@
 #define FILE_TYPE_REGULAR 1
 #define FILE_TYPE_PIPE    2
 
-#define O_RDONLY 00
-#define O_WRONLY 01
-#define O_RDWR   02
-#define O_CREAT  0100
-#define O_TRUNC  01000
+#define O_RDONLY  00
+#define O_WRONLY  01
+#define O_RDWR    02
+#define O_CREAT   0100
+#define O_TRUNC   01000
+#define O_APPEND  02000
 
 #define USER_TEXT_BASE 0x60000000ULL
 #define EXEC_MAGIC     0x4C494E5553303031ULL
@@ -41,7 +42,7 @@ struct ram_file {
     char *data;
     uint64_t size;
     uint64_t capacity;
-    uint64_t mtime; /* Время последнего изменения */
+    uint64_t mtime;
     int in_use;
     int is_readonly;
     int is_dir;

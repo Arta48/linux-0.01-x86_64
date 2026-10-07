@@ -7,7 +7,6 @@
 #include <linux/fs.h>
 #include <linux/signal.h>
 #include <linux/time.h>
-#include <linux/utsname.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -153,12 +152,7 @@ static inline void u_exit(int status)
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-static inline int64_t u_uname(struct utsname *name)
-{
-    return u_syscall(__NR_uname, (uint64_t)name, 0, 0);
-}
-
-/* Строковые вспомогательные функции */
+/* Строковые функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -184,25 +178,6 @@ static void u_print_num(uint64_t n)
     }
 }
 
-static void u_print_hex(uint64_t n)
-{
-    char buf[32];
-    char digits[] = "0123456789ABCDEF";
-    int i = 0;
-    if (n == 0) {
-        u_print("0x0");
-        return;
-    }
-    while (n > 0) {
-        buf[i++] = digits[n % 16];
-        n /= 16;
-    }
-    u_print("0x");
-    while (--i >= 0) {
-        u_write(1, &buf[i], 1);
-    }
-}
-
 static int u_strcmp(const char *s1, const char *s2)
 {
     while (*s1 && (*s1 == *s2)) {
@@ -223,6 +198,19 @@ static int u_strncmp(const char *s1, const char *s2, uint64_t n)
     return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
+static const char *u_strstr(const char *haystack, const char *needle)
+{
+    if (!*needle) return haystack;
+    for (; *haystack; haystack++) {
+        if (*haystack == *needle) {
+            const char *h = haystack, *n = needle;
+            while (*h && *n && *h == *n) { h++; n++; }
+            if (!*n) return haystack;
+        }
+    }
+    return NULL;
+}
+
 static int u_atoi(const char *s)
 {
     int res = 0;
@@ -233,7 +221,7 @@ static int u_atoi(const char *s)
     return res;
 }
 
-/* Преобразование секунд Unix Epoch в дату и время */
+/* Форматирование даты */
 static const char *day_names[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 static const char *mon_names[] = {
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -248,7 +236,7 @@ static void print_date(uint64_t epoch)
     uint64_t hour = (epoch / 3600) % 24;
     uint64_t days = epoch / 86400;
 
-    int wday = (days + 4) % 7; /* 1 янв 1970 был четвергом */
+    int wday = (days + 4) % 7;
 
     int year = 1970;
     while (1) {
@@ -257,9 +245,7 @@ static void print_date(uint64_t epoch)
         if (days >= (uint64_t)ydays) {
             days -= ydays;
             year++;
-        } else {
-            break;
-        }
+        } else break;
     }
 
     int leap = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0));
@@ -270,32 +256,43 @@ static void print_date(uint64_t epoch)
         if (days >= (uint64_t)mdays) {
             days -= mdays;
             mon++;
-        } else {
-            break;
-        }
+        } else break;
     }
     int mday = days + 1;
 
-    u_print(day_names[wday]);
-    u_print(" ");
-    u_print(mon_names[mon]);
-    u_print(" ");
+    u_print(day_names[wday]); u_print(" ");
+    u_print(mon_names[mon]); u_print(" ");
     if (mday < 10) u_print(" ");
-    u_print_num(mday);
-    u_print(" ");
-
+    u_print_num(mday); u_print(" ");
     if (hour < 10) u_print("0");
-    u_print_num(hour);
-    u_print(":");
+    u_print_num(hour); u_print(":");
     if (min < 10) u_print("0");
-    u_print_num(min);
-    u_print(":");
+    u_print_num(min); u_print(":");
     if (sec < 10) u_print("0");
     u_print_num(sec);
-
     u_print(" UTC ");
     u_print_num(year);
     u_print("\n");
+}
+
+/* ИСТОРИЯ КОМАНД ШЕЛЛА (Стрелочки Вверх/Вниз) */
+#define HISTORY_MAX 8
+static char history[HISTORY_MAX][128];
+static int history_count = 0;
+static int history_idx = 0;
+
+static void history_add(const char *cmd)
+{
+    if (cmd[0] == '\0') return;
+    int slot = history_count % HISTORY_MAX;
+    uint64_t i = 0;
+    while (cmd[i] && i < 127) {
+        history[slot][i] = cmd[i];
+        i++;
+    }
+    history[slot][i] = '\0';
+    history_count++;
+    history_idx = history_count;
 }
 
 static volatile int sigint_received = 0;
@@ -356,7 +353,8 @@ static void execute_pipeline(const char *cmd, const char *pipe_pos)
     u_waitpid(pid2, &status, 0);
 }
 
-static void execute_redirection(const char *cmd, const char *redir_pos)
+/* Поддержка перенаправления: > (перезапись) и >> (дозапись) */
+static void execute_redirection(const char *cmd, const char *redir_pos, int append)
 {
     char left[64];
     char fname[MAX_FILENAME];
@@ -367,7 +365,7 @@ static void execute_redirection(const char *cmd, const char *redir_pos)
     while (l_len > 0 && (left[l_len - 1] == ' ' || left[l_len - 1] == '\t')) l_len--;
     left[l_len] = '\0';
 
-    const char *r_ptr = redir_pos + 1;
+    const char *r_ptr = redir_pos + (append ? 2 : 1);
     while (*r_ptr == ' ' || *r_ptr == '\t') r_ptr++;
     uint64_t r_len = 0;
     while (r_ptr[r_len] && r_ptr[r_len] != ' ' && r_ptr[r_len] != '\t' && r_len < MAX_FILENAME - 1) {
@@ -378,7 +376,8 @@ static void execute_redirection(const char *cmd, const char *redir_pos)
 
     int64_t pid = u_fork();
     if (pid == 0) {
-        int64_t fd = u_open(fname, O_CREAT | O_WRONLY | O_TRUNC);
+        int flags = O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC);
+        int64_t fd = u_open(fname, flags);
         if (fd < 0) {
             u_print("shell: cannot open file: ");
             u_print(fname);
@@ -396,10 +395,66 @@ static void execute_redirection(const char *cmd, const char *redir_pos)
     }
 }
 
+static void do_grep(const char *pattern, int fd)
+{
+    char line[128];
+    int li = 0;
+    char c;
+    while (u_read(fd, &c, 1) > 0) {
+        if (c == '\n') {
+            line[li] = '\0';
+            if (u_strstr(line, pattern) != NULL) {
+                u_print(line);
+                u_print("\n");
+            }
+            li = 0;
+        } else {
+            if (li < (int)sizeof(line) - 1) {
+                line[li++] = c;
+            }
+        }
+    }
+    if (li > 0) {
+        line[li] = '\0';
+        if (u_strstr(line, pattern) != NULL) {
+            u_print(line);
+            u_print("\n");
+        }
+    }
+}
+
+static void do_wc(int fd, int only_lines)
+{
+    uint64_t lines = 0, words = 0, bytes = 0;
+    int in_word = 0;
+    char c;
+
+    while (u_read(fd, &c, 1) > 0) {
+        bytes++;
+        if (c == '\n') lines++;
+        if (c == ' ' || c == '\t' || c == '\n') {
+            in_word = 0;
+        } else if (!in_word) {
+            in_word = 1;
+            words++;
+        }
+    }
+
+    if (only_lines) {
+        u_print_num(lines);
+        u_print("\n");
+    } else {
+        u_print_num(lines); u_print(" ");
+        u_print_num(words); u_print(" ");
+        u_print_num(bytes); u_print("\n");
+    }
+}
+
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') return;
 
+    /* 1. Пайп: cmd1 | cmd2 */
     const char *pipe_pos = cmd;
     while (*pipe_pos && *pipe_pos != '|') pipe_pos++;
     if (*pipe_pos == '|') {
@@ -407,32 +462,84 @@ static void execute_command(const char *cmd)
         return;
     }
 
+    /* 2. Дозапись в файл: cmd >> file */
+    const char *redir_app = cmd;
+    while (*redir_app) {
+        if (redir_app[0] == '>' && redir_app[1] == '>') {
+            execute_redirection(cmd, redir_app, 1);
+            return;
+        }
+        redir_app++;
+    }
+
+    /* 3. Перезапись файла: cmd > file */
     const char *redir_pos = cmd;
     while (*redir_pos && *redir_pos != '>') redir_pos++;
     if (*redir_pos == '>') {
-        execute_redirection(cmd, redir_pos);
+        execute_redirection(cmd, redir_pos, 0);
         return;
     }
 
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
+        u_print("  grep <pat> [f]  - search pattern in file or stream\n");
+        u_print("  wc [-l] [f]     - count lines/words/bytes in file or stream\n");
+        u_print("  cmd > <file>    - overwrite output to file\n");
+        u_print("  cmd >> <file>   - append output to file\n");
+        u_print("  cmd1 | cmd2     - execute Unix pipeline (e.g. ls | grep txt)\n");
         u_print("  date            - display current real CMOS RTC date/time\n");
         u_print("  pwd / cd [dir]  - directory navigation\n");
-        u_print("  ls [-l] [dir]   - list files (supports detailed -l flag)\n");
+        u_print("  ls [-l] [dir]   - list files (compact or detailed -l)\n");
         u_print("  mkdir / rmdir   - directory management\n");
         u_print("  cat [file]      - display file contents (or stdin)\n");
         u_print("  touch / rm      - create or remove files\n");
-        u_print("  cmd > <file>    - redirect command output to file\n");
-        u_print("  cmd1 | cmd2     - execute Unix pipeline\n");
         u_print("  <binary>        - execute binary via fork() + execve()\n");
         u_print("  sleep <sec>     - sleep N seconds (interruptible by Ctrl+C)\n");
         u_print("  sigtest         - test Ring 3 custom SIGINT handler\n");
-        u_print("  heap / malloc   - dynamic memory management\n");
         u_print("  ps / kill / wait- process management\n");
-        u_print("  bench           - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  clear / exit    - terminal control\n");
-        u_print("  uname [-a]      - print system information\n");
+    } else if (u_strncmp(cmd, "grep ", 5) == 0) {
+        const char *p = cmd + 5;
+        while (*p == ' ') p++;
+        char pat[64];
+        int pi = 0;
+        while (*p && *p != ' ' && pi < 63) pat[pi++] = *p++;
+        pat[pi] = '\0';
+        while (*p == ' ') p++;
+
+        if (*p != '\0') {
+            int64_t fd = u_open(p, O_RDONLY);
+            if (fd < 0) {
+                u_print("grep: cannot open: "); u_print(p); u_print("\n");
+            } else {
+                do_grep(pat, (int)fd);
+                u_close((int)fd);
+            }
+        } else {
+            do_grep(pat, 0); /* Чтение из stdin / пайпа */
+        }
+    } else if (u_strncmp(cmd, "wc", 2) == 0 && (cmd[2] == ' ' || cmd[2] == '\0')) {
+        const char *p = cmd + 2;
+        while (*p == ' ') p++;
+        int only_l = 0;
+        if (u_strncmp(p, "-l", 2) == 0) {
+            only_l = 1;
+            p += 2;
+            while (*p == ' ') p++;
+        }
+
+        if (*p != '\0') {
+            int64_t fd = u_open(p, O_RDONLY);
+            if (fd < 0) {
+                u_print("wc: cannot open: "); u_print(p); u_print("\n");
+            } else {
+                do_wc((int)fd, only_l);
+                u_close((int)fd);
+            }
+        } else {
+            do_wc(0, only_l); /* Чтение из stdin / пайпа */
+        }
     } else if (u_strcmp(cmd, "date") == 0) {
         uint64_t epoch = (uint64_t)u_time();
         print_date(epoch);
@@ -509,24 +616,10 @@ static void execute_command(const char *cmd)
     } else if (u_strncmp(cmd, "echo ", 5) == 0) {
         u_print(cmd + 5);
         u_print("\n");
-    } else if (u_strcmp(cmd, "heap") == 0) {
-        uint64_t cur_brk = (uint64_t)u_brk(0);
-        uint64_t heap_size = cur_brk - HEAP_START_VIRT;
-        u_print("Process Heap Info:\n  Start Break : ");
-        u_print_hex(HEAP_START_VIRT);
-        u_print("\n  Current Break: ");
-        u_print_hex(cur_brk);
-        u_print("\n  Heap Size   : ");
-        u_print_num(heap_size);
-        u_print(" bytes\n");
     } else if (u_strncmp(cmd, "sleep ", 6) == 0) {
         int sec = u_atoi(cmd + 6);
         if (sec <= 0) sec = 1;
-
-        u_print("Sleeping for ");
-        u_print_num(sec);
-        u_print(" seconds (press Ctrl+C to abort)...\n");
-
+        u_print("Sleeping for "); u_print_num(sec); u_print(" seconds...\n");
         int64_t pid = u_fork();
         if (pid == 0) {
             uint64_t start = (uint64_t)u_time();
@@ -535,11 +628,8 @@ static void execute_command(const char *cmd)
         } else if (pid > 0) {
             int status = 0;
             u_waitpid(pid, &status, 0);
-            if (status == 130) {
-                u_print("Sleep aborted by SIGINT (Ctrl+C)!\n");
-            } else {
-                u_print("Done.\n");
-            }
+            if (status == 130) u_print("Sleep aborted by SIGINT!\n");
+            else u_print("Done.\n");
         }
     } else if (u_strcmp(cmd, "sigtest") == 0) {
         int64_t pid = u_fork();
@@ -548,49 +638,14 @@ static void execute_command(const char *cmd)
             sigint_received = 0;
             u_signal(SIGINT, user_sigint_handler);
             u_print("Press Ctrl+C in terminal to trigger it...\n");
-
             while (!sigint_received) {
                 for (volatile int i = 0; i < 10000000; i++) {}
             }
-
             u_print("Signal handled successfully. Exiting child.\n");
             u_exit(0);
         } else if (pid > 0) {
             int status = 0;
             u_waitpid(pid, &status, 0);
-        }
-    } else if (u_strcmp(cmd, "pipe") == 0) {
-        int pipefd[2];
-        if (u_pipe(pipefd) < 0) return;
-        int64_t pid = u_fork();
-        if (pid == 0) {
-            u_close(pipefd[0]);
-            const char msg[] = ">>> [PIPE IPC] Secret message transmitted through Pipe!\n";
-            u_write(pipefd[1], msg, sizeof(msg) - 1);
-            u_close(pipefd[1]);
-            u_exit(0);
-        } else if (pid > 0) {
-            u_close(pipefd[1]);
-            char pbuf[128];
-            int64_t n = u_read(pipefd[0], pbuf, sizeof(pbuf) - 1);
-            if (n > 0) {
-                pbuf[n] = '\0';
-                u_print("Parent received: ");
-                u_print(pbuf);
-            }
-            u_close(pipefd[0]);
-            int status = 0;
-            u_waitpid(pid, &status, 0);
-        }
-    } else if (u_strcmp(cmd, "fork") == 0) {
-        int64_t pid = u_fork();
-        if (pid == 0) {
-            u_print("Child process working...\n");
-            u_exit(0);
-        } else if (pid > 0) {
-            int status = 0;
-            u_waitpid(pid, &status, 0);
-            u_print("Child finished and reaped.\n");
         }
     } else if (u_strcmp(cmd, "ps") == 0) {
         u_ps();
@@ -599,41 +654,13 @@ static void execute_command(const char *cmd)
         if (target_pid > 1) u_kill(target_pid, SIGKILL);
     } else if (u_strcmp(cmd, "uptime") == 0) {
         uint64_t ticks = (uint64_t)u_time();
-        u_print("Uptime: ");
-        u_print_num(ticks - startup_time);
-        u_print(" seconds\n");
+        u_print("Uptime: "); u_print_num(ticks - startup_time); u_print(" seconds\n");
     } else if (u_strcmp(cmd, "getpid") == 0) {
-        u_print("Current PID: ");
-        u_print_num((uint64_t)u_getpid());
-        u_print("\n");
+        u_print("Current PID: "); u_print_num((uint64_t)u_getpid()); u_print("\n");
     } else if (u_strcmp(cmd, "clear") == 0) {
         u_print("\f");
-    } else if (u_strcmp(cmd, "bench") == 0) {
-        u_print("Benchmarking 500,000 getpid()...\n");
-        uint64_t s_int = (uint64_t)u_time();
-        for (int i = 0; i < 500000; i++) u_int80(__NR_getpid, 0, 0, 0);
-        uint64_t t_int = (uint64_t)u_time() - s_int;
-        uint64_t s_fast = (uint64_t)u_time();
-        for (int i = 0; i < 500000; i++) u_syscall(__NR_getpid, 0, 0, 0);
-        uint64_t t_fast = (uint64_t)u_time() - s_fast;
-        u_print("int 0x80: "); u_print_num(t_int); u_print(" sec\n");
-        u_print("syscall : "); u_print_num(t_fast); u_print(" sec\n");
     } else if (u_strcmp(cmd, "exit") == 0) {
         u_exit(0);
-    } else if (u_strncmp(cmd, "uname", 5) == 0 && (cmd[5] == ' ' || cmd[5] == '\0')) {
-        struct utsname u;
-        if (u_uname(&u) == 0) {
-            if (cmd[5] == ' ' && cmd[6] == '-' && cmd[7] == 'a') {
-                u_print(u.sysname); u_print(" ");
-                u_print(u.nodename); u_print(" ");
-                u_print(u.release); u_print(" ");
-                u_print(u.version); u_print(" ");
-                u_print(u.machine); u_print("\n");
-            } else {
-                u_print(u.sysname);
-                u_print("\n");
-            }
-        }
     } else {
         int64_t pid = u_fork();
         if (pid == 0) {
@@ -648,7 +675,6 @@ static void execute_command(const char *cmd)
                 bin_path[bi] = '\0';
                 err = u_execve(bin_path, NULL, NULL);
             }
-
             if (err < 0) {
                 u_print("shell: command or binary not found: ");
                 u_print(cmd);
@@ -691,6 +717,45 @@ void user_init_process(void)
     while (1) {
         char c;
         if (u_read(0, &c, 1) > 0) {
+            /* ОБРАБОТКА СТРЕЛОЧЕК ВВЕРХ И ВНИЗ (ANSI \033[A и \033[B) */
+            if (c == 27) {
+                char seq[2];
+                if (u_read(0, &seq[0], 1) > 0 && seq[0] == '[') {
+                    if (u_read(0, &seq[1], 1) > 0) {
+                        if (seq[1] == 'A') {
+                            /* СТРЕЛКА ВВЕРХ: предыдущая команда */
+                            if (history_count > 0 && history_idx > 0) {
+                                history_idx--;
+                                while (buf_len > 0) { u_write(1, "\b", 1); buf_len--; }
+                                int slot = history_idx % HISTORY_MAX;
+                                const char *hcmd = history[slot];
+                                while (*hcmd && buf_len < 127) {
+                                    cmd_buf[buf_len++] = *hcmd;
+                                    u_write(1, hcmd, 1);
+                                    hcmd++;
+                                }
+                            }
+                        } else if (seq[1] == 'B') {
+                            /* СТРЕЛКА ВНИЗ: следующая команда */
+                            if (history_count > 0 && history_idx < history_count) {
+                                history_idx++;
+                                while (buf_len > 0) { u_write(1, "\b", 1); buf_len--; }
+                                if (history_idx < history_count) {
+                                    int slot = history_idx % HISTORY_MAX;
+                                    const char *hcmd = history[slot];
+                                    while (*hcmd && buf_len < 127) {
+                                        cmd_buf[buf_len++] = *hcmd;
+                                        u_write(1, hcmd, 1);
+                                        hcmd++;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
             if (c == 3) {
                 u_print("^C\n");
                 buf_len = 0;
@@ -707,6 +772,8 @@ void user_init_process(void)
             else if (c == '\n') {
                 u_write(1, "\n", 1);
                 cmd_buf[buf_len] = '\0';
+
+                history_add(cmd_buf); /* Сохраняем в историю команд */
 
                 execute_command(cmd_buf);
 

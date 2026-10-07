@@ -334,7 +334,6 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].generator = NULL;
     }
 
-    /* При открытии /proc генерируем свежие данные */
     if (ram_files[file_idx].is_proc && ram_files[file_idx].generator) {
         ram_files[file_idx].generator(ram_files[file_idx].base.data, ram_files[file_idx].base.capacity);
         ram_files[file_idx].base.size = strlen(ram_files[file_idx].base.data);
@@ -349,7 +348,14 @@ int64_t sys_open(const char *filename, int flags)
         if (!current->filp[fd].in_use) {
             current->filp[fd].type = FILE_TYPE_REGULAR;
             current->filp[fd].rf   = (struct ram_file *)&ram_files[file_idx].base;
-            current->filp[fd].pos  = 0;
+
+            /* ПОДДЕРЖКА O_APPEND: пишем в конец файла! */
+            if (flags & O_APPEND) {
+                current->filp[fd].pos = ram_files[file_idx].base.size;
+            } else {
+                current->filp[fd].pos = 0;
+            }
+
             current->filp[fd].pipe = NULL;
             current->filp[fd].in_use = 1;
             current->filp[fd].mode = (flags & 3) ? (flags & 3) : 1;
