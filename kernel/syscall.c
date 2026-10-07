@@ -4,6 +4,7 @@
 #include <linux/keyboard.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/string.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -177,15 +178,12 @@ static int64_t sys_kill(int64_t pid, int sig)
     return 0;
 }
 
-/* sys_brk: изменение границы кучи (Program Break) */
 static int64_t sys_brk(uint64_t new_brk)
 {
-    /* Запрос текущей границы кучи (sbrk(0)) */
     if (new_brk == 0 || new_brk < current->start_brk) {
         return (int64_t)current->brk;
     }
 
-    /* Расширение кучи: выделяем и маппим новые страницы */
     if (new_brk > current->brk) {
         uint64_t cur_page = PAGE_ALIGN(current->brk);
         uint64_t end_page = PAGE_ALIGN(new_brk);
@@ -193,15 +191,72 @@ static int64_t sys_brk(uint64_t new_brk)
         for (uint64_t addr = cur_page; addr < end_page; addr += PAGE_SIZE) {
             uint64_t phys = get_free_page();
             if (!phys) {
-                return (int64_t)current->brk; /* Out of Memory */
+                return (int64_t)current->brk;
             }
-            /* Маппим страницу в 4-уровневые таблицы с правами Ring 3 */
             map_page(NULL, addr, phys, PTE_WRITABLE | PTE_USER);
         }
     }
 
     current->brk = new_brk;
     return (int64_t)current->brk;
+}
+
+/* sys_execve: загрузка бинарной программы в пространство процесса */
+static int64_t sys_execve(const char *filename, char **argv, char **envp, struct trap_frame *tf)
+{
+    (void)argv;
+    (void)envp;
+
+    if (!tf) return -1;
+
+    uint64_t file_size = 0;
+    const char *data = fs_get_file_data(filename, &file_size);
+    if (!data || file_size < sizeof(struct exec_header)) {
+        return -1; /* Файл не найден или слишком мал */
+    }
+
+    const struct exec_header *hdr = (const struct exec_header *)data;
+    if (hdr->magic != EXEC_MAGIC) {
+        return -1; /* Неверный формат исполняемого файла */
+    }
+
+    /* 1. Выделяем и маппим страницу памяти под сегмент кода бинарника */
+    uint64_t text_phys = get_free_page();
+    if (!text_phys) return -1;
+    map_page(NULL, USER_TEXT_BASE, text_phys, PTE_WRITABLE | PTE_USER);
+
+    /* Копируем машинный код бинарника (без заголовка) по адресу 0x60000000 + sizeof(exec_header) */
+    memcpy((void *)USER_TEXT_BASE, data, file_size);
+
+    /* 2. Выделяем чистую страницу для стека новой программы */
+    uint64_t new_stack = get_free_page();
+    if (!new_stack) return -1;
+
+    if (current->user_stack_page) {
+        free_page(current->user_stack_page);
+    }
+    current->user_stack_page = new_stack;
+    uint64_t user_rsp = new_stack + PAGE_SIZE - 16;
+
+    /* 3. Сбрасываем кучу процесса */
+    current->start_brk = HEAP_START_VIRT;
+    current->brk = HEAP_START_VIRT;
+
+    /* 4. Закрываем пользовательские дескрипторы 3..15 */
+    for (int i = 3; i < NR_OPEN; i++) {
+        if (current->filp[i].in_use) {
+            sys_close(i);
+        }
+    }
+
+    /* 5. Подменяем регистры в trap_frame для перехода в новый бинарник */
+    tf->rip = hdr->entry;
+    tf->rsp = user_rsp;
+    tf->rbp = user_rsp;
+    tf->rax = 0;
+    tf->rflags = 0x202; /* IF=1 */
+
+    return 0;
 }
 
 static int64_t sys_exit(int status)
@@ -227,6 +282,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_fork:
             if (!tf) return -1;
             return sys_fork(tf);
+        case __NR_execve:
+            if (!tf) return -1;
+            return sys_execve((const char *)arg1, (char **)arg2, (char **)arg3, tf);
         case __NR_pipe:
             return sys_pipe((int *)arg1);
         case __NR_open:

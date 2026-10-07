@@ -72,6 +72,11 @@ static inline int64_t u_fork(void)
     return u_int80(__NR_fork, 0, 0, 0);
 }
 
+static inline int64_t u_execve(const char *path, char **argv, char **envp)
+{
+    return u_int80(__NR_execve, (uint64_t)path, (uint64_t)argv, (uint64_t)envp);
+}
+
 static inline void u_ps(void)
 {
     u_syscall(__NR_ps, 0, 0, 0);
@@ -102,8 +107,7 @@ static inline void u_exit(int status)
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* --- ПОЛЬЗОВАТЕЛЬСКИЙ АЛЛОКАТОР ПАМЯТИ MALLOC / FREE (RING 3) --- */
-
+/* Аллокатор памяти malloc / free */
 struct block_header {
     uint64_t size;
     int is_free;
@@ -130,11 +134,8 @@ static void *u_sbrk(int64_t increment)
 static void *u_malloc(uint64_t size)
 {
     if (size == 0) return NULL;
-
-    /* Выравнивание размера по 16 байт */
     size = (size + 15) & ~15ULL;
 
-    /* Поиск свободного блока (First-Fit) */
     struct block_header *curr = heap_head;
     while (curr) {
         if (curr->is_free && curr->size >= size) {
@@ -144,11 +145,10 @@ static void *u_malloc(uint64_t size)
         curr = curr->next;
     }
 
-    /* Свободный блок не найден: расширяем кучу через sbrk */
     uint64_t total_size = sizeof(struct block_header) + size;
     void *raw = u_sbrk((int64_t)total_size);
     if (raw == (void *)-1) {
-        return NULL; /* Out of Memory */
+        return NULL;
     }
 
     struct block_header *new_block = (struct block_header *)raw;
@@ -170,11 +170,9 @@ static void *u_malloc(uint64_t size)
 static void u_free(void *ptr)
 {
     if (!ptr) return;
-
     struct block_header *hdr = (struct block_header *)ptr - 1;
     hdr->is_free = 1;
 
-    /* Объединение соседних свободных блоков (Coalescing) */
     struct block_header *curr = heap_head;
     while (curr && curr->next) {
         if (curr->is_free && curr->next->is_free) {
@@ -270,11 +268,12 @@ static void execute_command(const char *cmd)
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help         - show this help message\n");
+        u_print("  ls           - list files/binaries in RamFS\n");
+        u_print("  cat <file>   - display file contents\n");
+        u_print("  <binary>     - execute binary via fork() + execve()\n");
         u_print("  heap         - inspect process heap (brk / sbrk)\n");
         u_print("  malloc <sz>  - allocate <sz> bytes on the heap\n");
-        u_print("  malloctest   - stress test malloc() and free() allocation\n");
-        u_print("  ls           - list files in root RamFS\n");
-        u_print("  cat <file>   - display file contents\n");
+        u_print("  malloctest   - stress test malloc() and free()\n");
         u_print("  pipe         - test Unix IPC pipe (auto-reaped)\n");
         u_print("  fork         - test fork and waitpid reaping\n");
         u_print("  spawn        - spawn background infinite process\n");
@@ -541,9 +540,30 @@ static void execute_command(const char *cmd)
         u_print("Exiting shell...\n");
         u_exit(0);
     } else {
-        u_print("shell: command not found: ");
-        u_print(cmd);
-        u_print("\n");
+        /*
+         * ВНЕШНЯЯ КОМАНДА: ПАТТЕРН UNIX FORK + EXECVE!
+         * Если команда не встроена в шелл, ищем бинарный файл в RamFS!
+         */
+        int64_t pid = u_fork();
+        if (pid < 0) {
+            u_print("shell: fork failed\n");
+        } else if (pid == 0) {
+            /* Дочерний процесс замещает себя новой программой */
+            int64_t err = u_execve(cmd, NULL, NULL);
+            if (err < 0) {
+                u_print("shell: command or binary not found: ");
+                u_print(cmd);
+                u_print("\n");
+                u_exit(127);
+            }
+        } else {
+            /* Родительский шелл ожидает завершения программы */
+            int status = 0;
+            u_waitpid(pid, &status, 0);
+            u_print("[Program finished with exit code ");
+            u_print_num((uint64_t)status);
+            u_print("]\n");
+        }
     }
 }
 
