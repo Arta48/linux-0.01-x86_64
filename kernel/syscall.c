@@ -150,8 +150,6 @@ static void sys_ps(void)
 
 static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
 {
-    (void)options;
-
     repeat:
     for (int i = 1; i < NR_TASKS; i++) {
         if (task[i] && task[i]->father == current->pid) {
@@ -185,6 +183,10 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
     }
 
     if (has_children) {
+        /* WNOHANG: не ждем, если процесс еще работает */
+        if (options & 1) {
+            return 0;
+        }
         __asm__ volatile ("sti");
         schedule();
         goto repeat;
