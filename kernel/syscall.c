@@ -29,17 +29,15 @@ void syscall_init(void)
     printk("[OK] Hardware 'syscall/sysret' MSRs Initialized\n");
 }
 
-/* sys_read: поддерживает как stdin (fd 0), так и файлы RamFS (fd >= 3) */
 static int64_t sys_read(int fd, char *buf, uint64_t count)
 {
     if (count == 0) return 0;
 
-    /* Чтение из обычного файла */
+    /* Чтение из файла или канала */
     if (fd >= 3) {
         return sys_file_read(fd, buf, count);
     }
 
-    /* Чтение из stdin (fd == 0) */
     if (fd != 0) return -1;
 
     uint64_t bytes_read = 0;
@@ -63,6 +61,11 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
 
 static int64_t sys_write(int fd, const char *buf, uint64_t count)
 {
+    /* Запись в канал */
+    if (fd >= 3 && fd < NR_OPEN && current->filp[fd].in_use && current->filp[fd].type == FILE_TYPE_PIPE) {
+        return pipe_write(&current->filp[fd], buf, count);
+    }
+
     (void)fd;
     for (uint64_t i = 0; i < count; i++) {
         console_putc(buf[i]);
@@ -98,6 +101,14 @@ static void sys_ps(void)
 static int64_t sys_exit(int status)
 {
     printk("\n[Process %d exited with status %d]\n", current->pid, status);
+
+    /* Закрываем все открытые файлы и каналы процесса */
+    for (int i = 3; i < NR_OPEN; i++) {
+        if (current->filp[i].in_use) {
+            sys_close(i);
+        }
+    }
+
     current->state = TASK_ZOMBIE;
     schedule();
     for (;;);
@@ -108,11 +119,10 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
 {
     switch (nr) {
         case __NR_fork:
-            if (!tf) {
-                printk("[FORK] requires trap_frame\n");
-                return -1;
-            }
+            if (!tf) return -1;
             return sys_fork(tf);
+        case __NR_pipe:
+            return sys_pipe((int *)arg1);
         case __NR_open:
             return sys_open((const char *)arg1, (int)arg2);
         case __NR_close:

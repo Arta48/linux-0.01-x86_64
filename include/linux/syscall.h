@@ -14,6 +14,7 @@
 #define __NR_getpid 20
 #define __NR_ps     21
 #define __NR_list   22
+#define __NR_pipe   42
 
 void syscall_init(void);
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, struct trap_frame *tf);

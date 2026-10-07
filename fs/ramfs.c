@@ -9,7 +9,7 @@ struct ram_file {
     uint64_t size;
 };
 
-static const struct ram_file files[] = {
+static struct ram_file files[] = {
     {
         .name = "README.txt",
         .data = "====================================================\n"
@@ -21,24 +21,25 @@ static const struct ram_file files[] = {
         "  - Preemptive multitasking & decay scheduler\n"
         "  - Ring 3 user space isolation via TSS.rsp0\n"
         "  - Fast hardware MSR syscall / sysret\n"
-        "  - In-memory Virtual File System (RamFS)\n",
-        .size = 373
+        "  - In-memory Virtual File System (RamFS)\n"
+        "  - Inter-Process Communication (Unix Pipes)\n",
+        .size = 0
     },
     {
         .name = "version",
         .data = "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
-        .size = 64
+        .size = 0
     },
     {
         .name = "author",
         .data = "Original: Linus Torvalds (Helsinki, 1991)\n"
         "x86_64 Port: Educational Project (2026)\n",
-        .size = 82
+        .size = 0
     },
     {
         .name = "motd",
         .data = "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
-        .size = 59
+        .size = 0
     }
 };
 
@@ -46,6 +47,10 @@ static const struct ram_file files[] = {
 
 void fs_init(void)
 {
+    /* Автоматически вычисляем точный размер каждого файла */
+    for (uint64_t i = 0; i < TOTAL_FILES; i++) {
+        files[i].size = strlen(files[i].data);
+    }
     printk("[OK] Virtual File System (RamFS) Initialized (%d embedded files)\n", (int)TOTAL_FILES);
 }
 
@@ -67,10 +72,12 @@ int64_t sys_open(const char *filename, int flags)
 
     for (int fd = 3; fd < NR_OPEN; fd++) {
         if (!current->filp[fd].in_use) {
+            current->filp[fd].type = FILE_TYPE_REGULAR;
             current->filp[fd].name = files[file_idx].name;
             current->filp[fd].data = files[file_idx].data;
             current->filp[fd].size = files[file_idx].size;
             current->filp[fd].pos  = 0;
+            current->filp[fd].pipe = NULL;
             current->filp[fd].in_use = 1;
             return fd;
         }
@@ -84,7 +91,24 @@ int64_t sys_close(int fd)
     if (fd < 3 || fd >= NR_OPEN || !current->filp[fd].in_use) {
         return -1;
     }
-    current->filp[fd].in_use = 0;
+
+    struct file *f = &current->filp[fd];
+
+    if (f->type == FILE_TYPE_PIPE && f->pipe) {
+        if (f->mode == 1) f->pipe->readers--;
+        if (f->mode == 2) f->pipe->writers--;
+
+        f->pipe->ref_count--;
+        /* Освобождаем память строго один раз, когда закрыт последний дескриптор */
+        if (f->pipe->ref_count <= 0) {
+            free_page((uint64_t)f->pipe);
+        }
+    }
+
+    f->in_use = 0;
+    f->type = 0;
+    f->mode = 0;
+    f->pipe = NULL;
     return 0;
 }
 
@@ -95,6 +119,13 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
     }
 
     struct file *f = &current->filp[fd];
+
+    /* Если дескриптор указывает на канал */
+    if (f->type == FILE_TYPE_PIPE) {
+        return pipe_read(f, buf, count);
+    }
+
+    /* Обычный файл */
     if (f->pos >= f->size) {
         return 0;
     }

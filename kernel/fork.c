@@ -3,6 +3,7 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/string.h>
+#include <linux/fs.h>
 
 extern void ret_from_fork(void);
 
@@ -33,7 +34,15 @@ int64_t sys_fork(struct trap_frame *tf)
     child->state = TASK_RUNNING;
     child->counter = child->priority;
 
-    /* Копируем стек пользователя через системный memcpy */
+    /* Обновляем счетчики открытых каналов при наследовании дескрипторов */
+    for (int fd = 3; fd < NR_OPEN; fd++) {
+        if (child->filp[fd].in_use && child->filp[fd].type == FILE_TYPE_PIPE && child->filp[fd].pipe) {
+            child->filp[fd].pipe->ref_count++;
+            if (child->filp[fd].mode == 1) child->filp[fd].pipe->readers++;
+            if (child->filp[fd].mode == 2) child->filp[fd].pipe->writers++;
+        }
+    }
+
     uint64_t parent_user_stack_page = tf->rsp & ~0xFFFULL;
     uint64_t child_user_stack_page = get_free_page();
     if (!child_user_stack_page) {

@@ -32,7 +32,6 @@ static inline int64_t u_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint6
     return ret;
 }
 
-/* Обертки системных вызовов VFS для User Space */
 static inline int64_t u_open(const char *path, int flags)
 {
     return u_syscall(__NR_open, (uint64_t)path, flags, 0);
@@ -51,6 +50,11 @@ static inline int64_t u_read(int fd, char *buf, uint64_t count)
 static inline int64_t u_write(int fd, const char *buf, uint64_t count)
 {
     return u_syscall(__NR_write, fd, (uint64_t)buf, count);
+}
+
+static inline int64_t u_pipe(int *pipefd)
+{
+    return u_syscall(__NR_pipe, (uint64_t)pipefd, 0, 0);
 }
 
 static inline int64_t u_getpid(void)
@@ -129,7 +133,6 @@ static int u_strncmp(const char *s1, const char *s2, uint64_t n)
     return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
-/* Парсер и обработчик команд */
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') {
@@ -141,6 +144,7 @@ static void execute_command(const char *cmd)
         u_print("  help        - show this help message\n");
         u_print("  ls          - list files in root RamFS\n");
         u_print("  cat <file>  - display file contents\n");
+        u_print("  pipe        - test Unix IPC pipe between processes\n");
         u_print("  bench       - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  fork        - test sys_fork() child creation\n");
         u_print("  ps          - show running processes\n");
@@ -149,6 +153,42 @@ static void execute_command(const char *cmd)
         u_print("  clear       - clear the console screen\n");
         u_print("  echo ..     - print arguments to console\n");
         u_print("  exit        - terminate this shell process\n");
+    } else if (u_strcmp(cmd, "pipe") == 0) {
+        int pipefd[2];
+        if (u_pipe(pipefd) < 0) {
+            u_print("pipe: failed to create pipe!\n");
+            return;
+        }
+
+        u_print("Created pipe: read_fd = ");
+        u_print_num(pipefd[0]);
+        u_print(", write_fd = ");
+        u_print_num(pipefd[1]);
+        u_print("\nForking child to test IPC communication...\n");
+
+        int64_t pid = u_fork();
+        if (pid == 0) {
+            /* ДОЧЕРНИЙ ПРОЦЕСС: пишет сообщение в канал */
+            u_close(pipefd[0]); /* Закрываем неиспользуемый конец чтения */
+
+            const char msg[] = ">>> [PIPE IPC] Secret message transmitted from Child to Parent through Pipe!\n";
+            u_write(pipefd[1], msg, sizeof(msg) - 1);
+            u_close(pipefd[1]); /* Закрываем конец записи (сигнализирует EOF) */
+
+            u_exit(0);
+        } else if (pid > 0) {
+            /* РОДИТЕЛЬСКИЙ ПРОЦЕСС: читает сообщение из канала */
+            u_close(pipefd[1]); /* Закрываем неиспользуемый конец записи */
+
+            char pbuf[128];
+            int64_t n = u_read(pipefd[0], pbuf, sizeof(pbuf) - 1);
+            if (n > 0) {
+                pbuf[n] = '\0';
+                u_print("Parent received via Pipe:\n");
+                u_print(pbuf);
+            }
+            u_close(pipefd[0]);
+        }
     } else if (u_strcmp(cmd, "ls") == 0) {
         char buf[512];
         if (u_list(buf, sizeof(buf)) > 0) {
@@ -156,9 +196,9 @@ static void execute_command(const char *cmd)
         }
     } else if (u_strncmp(cmd, "cat ", 4) == 0) {
         const char *filename = cmd + 4;
-        while (*filename == ' ') filename++; /* Пропускаем лишние пробелы */
+        while (*filename == ' ') filename++;
 
-            int64_t fd = u_open(filename, 0);
+        int64_t fd = u_open(filename, 0);
         if (fd < 0) {
             u_print("cat: file not found: ");
             u_print(filename);
