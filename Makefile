@@ -6,7 +6,7 @@ CFLAGS = -Wall -Wextra -O2 -m64 -mcmodel=kernel -ffreestanding \
 LD = ld
 LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 
-OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o kernel/traps.o
+OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o kernel/traps.o mm/memory.o
 
 all: Image
 
@@ -25,11 +25,14 @@ kernel/console.o: kernel/console.c
 kernel/traps.o: kernel/traps.c
 	$(CC) $(CFLAGS) -c kernel/traps.c -o kernel/traps.o
 
+mm/memory.o: mm/memory.c
+	$(CC) $(CFLAGS) -c mm/memory.c -o mm/memory.o
+
 Image: $(OBJS)
 	$(LD) $(LDFLAGS) -o Image $(OBJS)
 
 run: Image
-	qemu-system-x86_64 -kernel Image -serial stdio
+	qemu-system-x86_64 -m 128M -kernel Image -serial stdio
 
 clean:
 	rm -f $(OBJS) Image

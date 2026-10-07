@@ -33,6 +33,9 @@ SECTIONS
         *(.bss*)
     }
 
+    . = ALIGN(4K);
+    _end = .;
+
     /DISCARD/ :
     {
         *(.eh_frame)
