@@ -2,6 +2,7 @@
 #include <linux/tty.h>
 #include <linux/sched.h>
 #include <linux/syscall.h>
+#include <linux/keyboard.h>
 #include <asm/io.h>
 
 #define PIC1_CMD  0x20
@@ -24,14 +25,14 @@ extern void isr8();  extern void isr9();  extern void isr10(); extern void isr11
 extern void isr12(); extern void isr13(); extern void isr14(); extern void isr15();
 extern void isr16(); extern void isr17(); extern void isr18(); extern void isr19();
 extern void isr32(); extern void isr33();
-extern void isr128(); /* int 0x80 */
+extern void isr128();
 
 static void set_idt_gate(int n, uint64_t handler, uint8_t dpl)
 {
     idt[n].offset_low  = handler & 0xFFFF;
     idt[n].selector    = 0x08;
     idt[n].ist         = 0;
-    idt[n].type_attr   = 0x8E | (dpl << 5); /* 0x8E для Ring 0, 0xEE для Ring 3 */
+    idt[n].type_attr   = 0x8E | (dpl << 5);
     idt[n].offset_mid  = (handler >> 16) & 0xFFFF;
     idt[n].offset_high = (handler >> 32) & 0xFFFFFFFF;
     idt[n].zero        = 0;
@@ -51,7 +52,8 @@ static void pic_remap(void)
     outb(0x01, PIC1_DATA);
     outb(0x01, PIC2_DATA);
 
-    outb(0xFE, PIC1_DATA);
+    /* Размаскируем IRQ0 (бит 0) и IRQ1 (бит 1) -> 0xFC (11111100b) */
+    outb(0xFC, PIC1_DATA);
     outb(0xFF, PIC2_DATA);
 }
 
@@ -69,7 +71,6 @@ void trap_init(void)
     idtr.base  = (uint64_t)&idt;
 
     for (int i = 0; i < 20; i++) {
-        /* Исключения процессора: Ring 0 */
         set_idt_gate(i, (uint64_t)isr0, 0);
     }
     set_idt_gate(0,  (uint64_t)isr0, 0);   set_idt_gate(1,  (uint64_t)isr1, 0);
@@ -83,14 +84,18 @@ void trap_init(void)
     set_idt_gate(16, (uint64_t)isr16, 0);  set_idt_gate(17, (uint64_t)isr17, 0);
     set_idt_gate(18, (uint64_t)isr18, 0);  set_idt_gate(19, (uint64_t)isr19, 0);
 
-    /* Таймер IRQ0: Ring 0 */
+    /* IRQ0 (Таймер) */
     set_idt_gate(32, (uint64_t)isr32, 0);
 
-    /* Системный вызов int 0x80: Ring 3 (DPL = 3 -> 0xEE) */
+    /* IRQ1 (Клавиатура) */
+    set_idt_gate(33, (uint64_t)isr33, 0);
+
+    /* Системные вызовы int 0x80 (DPL = 3) */
     set_idt_gate(128, (uint64_t)isr128, 3);
 
     pic_remap();
     timer_init();
+    keyboard_init();
 
     __asm__ volatile ("lidt %0" : : "m"(idtr));
 }
@@ -107,7 +112,6 @@ void isr_handler(struct trap_frame *tf)
 {
     /* Системный вызов int 0x80 */
     if (tf->int_no == 128) {
-        /* RAX = номер вызова, RBX = arg1, RCX = arg2, RDX = arg3 */
         tf->rax = syscall_dispatcher(tf->rax, tf->rbx, tf->rcx, tf->rdx);
         return;
     }
@@ -118,6 +122,11 @@ void isr_handler(struct trap_frame *tf)
             jiffies++;
             outb(0x20, 0x20);
             do_timer();
+            return;
+        }
+        if (tf->int_no == 33) {
+            keyboard_handler();
+            outb(0x20, 0x20);
             return;
         }
         if (tf->int_no >= 40) {

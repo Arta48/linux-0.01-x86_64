@@ -40,14 +40,27 @@ void console_init(void)
 
 void console_putc(char c)
 {
-    serial_putc(c);
+    if (c == '\b') {
+        if (cursor_x > 0) {
+            cursor_x--;
+            vga[cursor_y * VGA_WIDTH + cursor_x] = (0x07 << 8) | ' ';
+            serial_putc('\b');
+            serial_putc(' ');
+            serial_putc('\b');
+        }
+        return;
+    }
 
     if (c == '\n') {
+        serial_putc('\r');
+        serial_putc('\n');
         cursor_x = 0;
         cursor_y++;
     } else if (c == '\r') {
+        serial_putc('\r');
         cursor_x = 0;
     } else {
+        serial_putc(c);
         vga[cursor_y * VGA_WIDTH + cursor_x] = (0x0A << 8) | c;
         cursor_x++;
         if (cursor_x >= VGA_WIDTH) {

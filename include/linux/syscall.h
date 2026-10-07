@@ -4,6 +4,7 @@
 #include <linux/types.h>
 
 #define __NR_exit   1
+#define __NR_read   3
 #define __NR_write  4
 #define __NR_getpid 20
 

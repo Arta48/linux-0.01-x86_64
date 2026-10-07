@@ -1,8 +1,36 @@
 #include <linux/syscall.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
+#include <linux/keyboard.h>
 
-/* sys_write: прямой вывод символов в консоль */
+static int64_t sys_read(int fd, char *buf, uint64_t count)
+{
+    if (fd != 0 || count == 0) {
+        return -1;
+    }
+
+    uint64_t bytes_read = 0;
+
+    while (bytes_read < count) {
+        /* Разрешаем прерывания таймера и клавиатуры во время ожидания */
+        __asm__ volatile ("sti");
+
+        char c = keyboard_getchar();
+        if (c == 0) {
+            /* Усыпляем процессор до следующего прерывания (10 мс) */
+            __asm__ volatile ("hlt");
+            continue;
+        }
+
+        buf[bytes_read++] = c;
+        if (c == '\n') {
+            break;
+        }
+    }
+
+    return bytes_read;
+}
+
 static int64_t sys_write(int fd, const char *buf, uint64_t count)
 {
     (void)fd;
@@ -29,6 +57,8 @@ static int64_t sys_exit(int status)
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     switch (nr) {
+        case __NR_read:
+            return sys_read((int)arg1, (char *)arg2, arg3);
         case __NR_write:
             return sys_write((int)arg1, (const char *)arg2, arg3);
         case __NR_getpid:
