@@ -1,5 +1,5 @@
 /*
- * boot/boot.S -- Добавлен флаг User (0x4) для таблиц страниц
+ * boot/boot.S -- Включен бит SCE (System Call Extensions) в EFER MSR
  */
 
 .set MULTIBOOT_MAGIC,    0x1BADB002
@@ -41,7 +41,7 @@ _start:
     cld
     movl $stack_top, %esp
 
-    /* 1. Настройка таблиц с битом User (0x7 = Present | Writable | User) */
+    /* 1. Настройка таблиц страниц с битом User (0x7 и 0x87) */
     movl $pdpt_table, %eax
     orl  $0x7, %eax
     movl %eax, pml4_table
@@ -54,7 +54,7 @@ _start:
 set_pd_entries:
     movl $0x200000, %eax
     mull %ecx
-    orl  $0x87, %eax                  /* 0x87 = Present | Writable | User | 2MB Huge */
+    orl  $0x87, %eax
     movl %eax, pd_table(, %ecx, 8)
     incl %ecx
     cmpl $512, %ecx
@@ -74,10 +74,10 @@ set_pd_entries:
     orl  $(1 << 1), %eax
     movl %eax, %cr0
 
-    /* 4. Включаем Long Mode (бит 8 LME) */
+    /* 4. Включаем Long Mode (бит 8 LME) И System Call Extensions (бит 0 SCE) */
     movl $0xC0000080, %ecx
     rdmsr
-    orl  $(1 << 8), %eax
+    orl  $((1 << 8) | (1 << 0)), %eax   /* LME | SCE */
     wrmsr
 
     /* 5. Включаем пейджинг в CR0 */

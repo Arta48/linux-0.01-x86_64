@@ -17,6 +17,9 @@ static union task_union init_task = {
 struct task_struct *current = &(init_task.task);
 struct task_struct *task[NR_TASKS] = { &(init_task.task), };
 
+/* Глобальный указатель на стек ядра текущего процесса для инструкции syscall */
+uint64_t kernel_current_stack = (uint64_t)&init_task + PAGE_SIZE;
+
 extern void switch_to(struct task_struct *prev, struct task_struct *next);
 
 void sched_init(void)
@@ -24,7 +27,8 @@ void sched_init(void)
     for (int i = 1; i < NR_TASKS; i++) {
         task[i] = NULL;
     }
-    set_tss_stack((uint64_t)&init_task + PAGE_SIZE);
+    kernel_current_stack = (uint64_t)&init_task + PAGE_SIZE;
+    set_tss_stack(kernel_current_stack);
     printk("[OK] Scheduler Initialized: Task 0 (Idle) is active\n");
 }
 
@@ -95,8 +99,9 @@ void schedule(void)
         struct task_struct *prev = current;
         current = task[next];
 
-        /* Обновляем вершину стека ядра в TSS для прерываний из Ring 3 */
-        set_tss_stack((uint64_t)current + PAGE_SIZE);
+        /* Обновляем вершину стека ядра как для TSS (int 0x80), так и для MSR (syscall) */
+        kernel_current_stack = (uint64_t)current + PAGE_SIZE;
+        set_tss_stack(kernel_current_stack);
 
         switch_to(prev, task[next]);
     }

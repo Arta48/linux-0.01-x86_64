@@ -7,60 +7,67 @@
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
-/* Обертки системных вызовов Ring 3 */
-static inline int64_t u_fork(void)
-{
-    int64_t ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(__NR_fork) : "memory");
-    return ret;
-}
-
-static inline int64_t u_read(int fd, char *buf, uint64_t count)
+/* Медленный системный вызов через прерывание int 0x80 */
+static inline int64_t u_int80(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
 {
     int64_t ret;
     __asm__ volatile (
         "int $0x80"
         : "=a"(ret)
-        : "a"(__NR_read), "b"(fd), "c"((uint64_t)buf), "d"(count)
+        : "a"(nr), "b"(arg1), "c"(arg2), "d"(arg3)
         : "memory"
     );
     return ret;
+}
+
+/* Быстрый аппаратный 64-битный системный вызов через инструкцию syscall */
+static inline int64_t u_syscall(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+{
+    int64_t ret;
+    __asm__ volatile (
+        "syscall"
+        : "=a"(ret)
+        : "a"(nr), "D"(arg1), "S"(arg2), "d"(arg3)
+        : "rcx", "r11", "memory"
+    );
+    return ret;
+}
+
+/* Обертки для шелла: используем быстрый syscall */
+static inline int64_t u_read(int fd, char *buf, uint64_t count)
+{
+    return u_syscall(__NR_read, fd, (uint64_t)buf, count);
 }
 
 static inline int64_t u_write(int fd, const char *buf, uint64_t count)
 {
-    int64_t ret;
-    __asm__ volatile (
-        "int $0x80"
-        : "=a"(ret)
-        : "a"(__NR_write), "b"(fd), "c"((uint64_t)buf), "d"(count)
-        : "memory"
-    );
-    return ret;
+    return u_syscall(__NR_write, fd, (uint64_t)buf, count);
 }
 
 static inline int64_t u_getpid(void)
 {
-    int64_t ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(__NR_getpid) : "memory");
-    return ret;
+    return u_syscall(__NR_getpid, 0, 0, 0);
 }
 
 static inline int64_t u_time(void)
 {
-    int64_t ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(__NR_time) : "memory");
-    return ret;
+    return u_syscall(__NR_time, 0, 0, 0);
+}
+
+static inline int64_t u_fork(void)
+{
+    /* fork требует полный кадр trap_frame, поэтому вызывается через int 0x80 */
+    return u_int80(__NR_fork, 0, 0, 0);
 }
 
 static inline void u_ps(void)
 {
-    __asm__ volatile ("int $0x80" : : "a"(__NR_ps) : "memory");
+    u_syscall(__NR_ps, 0, 0, 0);
 }
 
 static inline void u_exit(int status)
 {
-    __asm__ volatile ("int $0x80" : : "a"(__NR_exit), "b"(status) : "memory");
+    u_syscall(__NR_exit, status, 0, 0);
 }
 
 /* Строковые функции */
@@ -109,7 +116,6 @@ static int u_strncmp(const char *s1, const char *s2, uint64_t n)
     return *(const unsigned char *)s1 - *(const unsigned char *)s2;
 }
 
-/* Обработчик команд шелла */
 static void execute_command(const char *cmd)
 {
     if (cmd[0] == '\0') {
@@ -119,6 +125,7 @@ static void execute_command(const char *cmd)
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help    - show this help message\n");
+        u_print("  bench   - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  fork    - test sys_fork() child creation\n");
         u_print("  ps      - show running processes\n");
         u_print("  uptime  - show system uptime\n");
@@ -126,25 +133,47 @@ static void execute_command(const char *cmd)
         u_print("  clear   - clear the console screen\n");
         u_print("  echo .. - print arguments to console\n");
         u_print("  exit    - terminate this shell process\n");
+    } else if (u_strcmp(cmd, "bench") == 0) {
+        u_print("Running benchmark: 500,000 getpid() syscalls...\n");
+
+        /* 1. Замер int 0x80 */
+        uint64_t start_int = (uint64_t)u_time();
+        for (int i = 0; i < 500000; i++) {
+            u_int80(__NR_getpid, 0, 0, 0);
+        }
+        uint64_t time_int = (uint64_t)u_time() - start_int;
+
+        /* 2. Замер аппаратного syscall */
+        uint64_t start_fast = (uint64_t)u_time();
+        for (int i = 0; i < 50000; i++) {
+            u_syscall(__NR_getpid, 0, 0, 0);
+        }
+        uint64_t time_fast = (uint64_t)u_time() - start_fast;
+
+        u_print("Results:\n  Legacy 'int 0x80' : ");
+        u_print_num(time_int);
+        u_print(" jiffies\n  Fast   'syscall'  : ");
+        u_print_num(time_fast);
+        u_print(" jiffies\n");
     } else if (u_strcmp(cmd, "fork") == 0) {
         int64_t pid = u_fork();
 
         if (pid < 0) {
             u_print("fork: failed to clone process!\n");
         } else if (pid == 0) {
-            /* ДОЧЕРНИЙ ПРОЦЕСС В RING 3 */
             u_print("\n>>> [CHILD] Process successfully spawned!\n");
             u_print(">>> [CHILD] My PID is: ");
             u_print_num(u_getpid());
             u_print("\n>>> [CHILD] Simulating work for 2 seconds...\n");
 
             uint64_t start = (uint64_t)u_time();
-            while ((uint64_t)u_time() - start < 200); /* 200 тиков = 2 сек */
+            while ((uint64_t)u_time() - start < 200) {
+                /* Ждем 2 сек */
+            }
 
-                u_print(">>> [CHILD] Work finished. Calling sys_exit(0)...\n");
+            u_print(">>> [CHILD] Work finished. Calling sys_exit(0)...\n");
             u_exit(0);
         } else {
-            /* РОДИТЕЛЬСКИЙ ПРОЦЕСС В RING 3 */
             u_print("Parent spawned child with PID = ");
             u_print_num(pid);
             u_print("\n");
@@ -237,6 +266,7 @@ void main(void)
 
     gdt_init();
     trap_init();
+    syscall_init();
     mem_init();
     sched_init();
 

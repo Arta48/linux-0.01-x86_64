@@ -8,7 +8,8 @@ LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 
 OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
-       kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o
+       kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
+       kernel/syscall_entry.o
 
 all: Image
 
@@ -26,6 +27,9 @@ kernel/gdt.o: kernel/gdt.c
 
 kernel/syscall.o: kernel/syscall.c
 	$(CC) $(CFLAGS) -c kernel/syscall.c -o kernel/syscall.o
+
+kernel/syscall_entry.o: kernel/syscall_entry.S
+	$(CC) $(CFLAGS) -c kernel/syscall_entry.S -o kernel/syscall_entry.o
 
 kernel/keyboard.o: kernel/keyboard.c
 	$(CC) $(CFLAGS) -c kernel/keyboard.c -o kernel/keyboard.o
