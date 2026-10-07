@@ -73,7 +73,7 @@ static void console_putc(char c)
 static void print_num(unsigned long n, int base)
 {
     char buf[65];
-    char digits[] = "0123456789ABCDEF";
+    static const char digits[] = "0123456789ABCDEF";
     int i = 0;
 
     if (n == 0) {

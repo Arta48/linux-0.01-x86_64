@@ -1,10 +1,9 @@
 /*
- * boot/boot.S -- Точка входа x86_64.
- * Переводит процессор из 32-битного режима Multiboot в 64-битный Long Mode.
+ * boot/boot.S -- Точка входа x86_64 с инициализацией FPU/SSE
  */
 
 .set MULTIBOOT_MAGIC,    0x1BADB002
-.set MULTIBOOT_FLAGS,    0x00000003   /* Выравнивание модулей + инфо о памяти */
+.set MULTIBOOT_FLAGS,    0x00000003
 .set MULTIBOOT_CHECKSUM, -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS)
 
 .section .multiboot, "a"
@@ -15,7 +14,6 @@
 
 .section .bss
 .align 4096
-/* 4-уровневые таблицы страниц для инициализации (покрывают первые 1 ГБ памяти) */
 pml4_table:
     .skip 4096
 pdpt_table:
@@ -23,15 +21,14 @@ pdpt_table:
 pd_table:
     .skip 4096
 stack_bottom:
-    .skip 16384 /* 16 КБ стека для ядра */
+    .skip 16384
 stack_top:
 
 .section .rodata
-/* 64-битная глобальная таблица дескрипторов (GDT) */
 gdt64:
-    .quad 0x0000000000000000          /* Нулевой дескриптор */
-    .quad 0x00209A0000000000          /* 64-bit Code Segment (Ring 0): L-bit=1, D-bit=0 */
-    .quad 0x0000920000000000          /* 64-bit Data Segment (Ring 0) */
+    .quad 0x0000000000000000
+    .quad 0x00209A0000000000
+    .quad 0x0000920000000000
 gdt64_desc:
     .word . - gdt64 - 1
     .quad gdt64
@@ -44,57 +41,56 @@ _start:
     cld
     movl $stack_top, %esp
 
-    /* 1. Настраиваем начальные таблицы страниц (Identity Paging для первых 1 ГБ) */
-    /* PML4[0] -> PDPT */
+    /* 1. Настройка таблиц страниц (1 ГБ Identity Mapping) */
     movl $pdpt_table, %eax
-    orl  $0x3, %eax                   /* Present | Writable */
+    orl  $0x3, %eax
     movl %eax, pml4_table
 
-    /* PDPT[0] -> PD */
     movl $pd_table, %eax
-    orl  $0x3, %eax                   /* Present | Writable */
+    orl  $0x3, %eax
     movl %eax, pdpt_table
 
-    /* Заполняем PD (512 записей по 2 МБ Huge Pages = 1 ГБ памяти) */
-    movl $0, %ecx                     /* Счетчик цикла: 0..511 */
+    movl $0, %ecx
 set_pd_entries:
-    movl $0x200000, %eax              /* 2 МБ */
+    movl $0x200000, %eax
     mull %ecx
-    orl  $0x83, %eax                  /* Present | Writable | Page Size (2MB Huge) */
+    orl  $0x83, %eax
     movl %eax, pd_table(, %ecx, 8)
     incl %ecx
     cmpl $512, %ecx
     jne  set_pd_entries
 
-    /* 2. Загружаем адрес PML4 в регистр CR3 */
     movl $pml4_table, %eax
     movl %eax, %cr3
 
-    /* 3. Включаем бит PAE (Physical Address Extension) в CR4 */
+    /* 2. Включаем PAE (бит 5), а также OSFXSR (бит 9) и OSXMMEXCPT (бит 10) для SSE */
     movl %cr4, %eax
-    orl  $(1 << 5), %eax
+    orl  $((1 << 5) | (1 << 9) | (1 << 10)), %eax
     movl %eax, %cr4
 
-    /* 4. Включаем Long Mode (бит LME) в EFER MSR (0xC0000080) */
-    movl $0xC0000080, %ecx
-    rdmsr
-    orl  $(1 << 8), %eax              /* Бит 8: LME (Long Mode Enable) */
-    wrmsr
-
-    /* 5. Включаем пейджинг в CR0 (активирует переход в Long Mode) */
+    /* 3. Очищаем CR0.EM (бит 2) и включаем CR0.MP (бит 1) */
     movl %cr0, %eax
-    orl  $(1 << 31) | (1 << 0), %eax  /* PG (Paging) и PE (Protection Enable) */
+    andl $~(1 << 2), %eax
+    orl  $(1 << 1), %eax
     movl %eax, %cr0
 
-    /* 6. Загружаем новую 64-битную GDT */
-    lgdt gdt64_desc
+    /* 4. Включаем Long Mode (бит 8 LME) в EFER MSR */
+    movl $0xC0000080, %ecx
+    rdmsr
+    orl  $(1 << 8), %eax
+    wrmsr
 
-    /* 7. Дальний переход для смены CS на 64-битный селектор (0x08) */
+    /* 5. Включаем пейджинг в CR0 */
+    movl %cr0, %eax
+    orl  $(1 << 31) | (1 << 0), %eax
+    movl %eax, %cr0
+
+    /* 6. Загружаем 64-битную GDT */
+    lgdt gdt64_desc
     ljmp $0x08, $long_mode_entry
 
 .code64
 long_mode_entry:
-    /* Сбрасываем сегментные регистры данных (в 64 битах они зануляются) */
     movw $0x10, %ax
     movw %ax, %ds
     movw %ax, %es
@@ -103,8 +99,6 @@ long_mode_entry:
     movw %ax, %ss
 
     movq $stack_top, %rsp
-
-    /* Переход в код на Си! */
     call main
 
 1:  hlt
