@@ -1,5 +1,5 @@
 /*
- * kernel/syscall_entry.S -- Аппаратный шлюз syscall / sysretq с полной защитой регистров
+ * kernel/syscall_entry.S -- Аппаратный шлюз syscall с поддержкой 4 аргументов
  */
 
 .code64
@@ -18,42 +18,43 @@ syscall_entry:
     movq %rsp, user_rsp_scratch(%rip)
     movq kernel_current_stack(%rip), %rsp
 
-    /* 2. Сохраняем служебные регистры для возврата через sysretq */
-    pushq user_rsp_scratch(%rip)    /* User RSP */
-    pushq %r11                      /* User RFLAGS (сохранен процессором) */
-    pushq %rcx                      /* User RIP (сохранен процессором) */
+    /* 2. Сохраняем регистры пользователя для sysretq */
+    pushq user_rsp_scratch(%rip)    /* +112: User RSP */
+    pushq %r11                      /* +104: User RFLAGS */
+    pushq %rcx                      /* +96:  User RIP */
 
-    /* 3. Сохраняем ВСЕ регистры пользователя, чтобы Си-код их не повредил */
-    pushq %r15
-    pushq %r14
-    pushq %r13
-    pushq %r12
-    pushq %rbp
-    pushq %rbx
-    pushq %r10
-    pushq %r9
-    pushq %r8
-    pushq %rdx
-    pushq %rsi
-    pushq %rdi
+    /* 3. Сохраняем регистры пользователя */
+    pushq %r15                      /* +88 */
+    pushq %r14                      /* +80 */
+    pushq %r13                      /* +72 */
+    pushq %r12                      /* +64 */
+    pushq %rbp                      /* +56 */
+    pushq %rbx                      /* +48 */
+    pushq %r10                      /* +40: 4-й аргумент syscall (arg4) */
+    pushq %r9                       /* +32 */
+    pushq %r8                       /* +24 */
+    pushq %rdx                      /* +16: 3-й аргумент (arg3) */
+    pushq %rsi                      /* +8:  2-й аргумент (arg2) */
+    pushq %rdi                      /* +0:  1-й аргумент (arg1) */
 
     /* 4. Передаем аргументы в C-функцию syscall_dispatcher:
           rdi = nr    (из rax)
-          rsi = arg1  (из 0(%rsp) - rdi)
-          rdx = arg2  (из 8(%rsp) - rsi)
-          rcx = arg3  (из 16(%rsp) - rdx)
-          r8  = tf    (NULL)
+          rsi = arg1  (из 0(%rsp))
+          rdx = arg2  (из 8(%rsp))
+          rcx = arg3  (из 16(%rsp))
+          r8  = arg4  (из 40(%rsp) - был r10)
+          r9  = tf    (NULL)
     */
     movq %rax, %rdi
     movq 0(%rsp),  %rsi
     movq 8(%rsp),  %rdx
     movq 16(%rsp), %rcx
-    xorq %r8,      %r8
+    movq 40(%rsp), %r8
+    xorq %r9,      %r9
 
     call syscall_dispatcher
-    /* Результат вызова в %rax */
 
-    /* 5. Восстанавливаем сохраненные регистры пользователя */
+    /* 5. Восстанавливаем регистры пользователя */
     popq %rdi
     popq %rsi
     popq %rdx
@@ -67,9 +68,8 @@ syscall_entry:
     popq %r14
     popq %r15
 
-    popq %rcx                       /* User RIP */
-    popq %r11                       /* User RFLAGS */
-    popq %rsp                       /* User RSP */
+    popq %rcx
+    popq %r11
+    popq %rsp
 
-    /* 6. Возврат в Ring 3 */
     sysretq

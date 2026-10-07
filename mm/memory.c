@@ -126,3 +126,17 @@ int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags)
     invlpg(virt);
     return 0;
 }
+
+uint32_t get_free_pages_count(void)
+{
+    uint32_t free_cnt = 0;
+    for (uint32_t i = 0; i < paging_pages; i++) {
+        if (mem_map[i] == 0) free_cnt++;
+    }
+    return free_cnt;
+}
+
+uint32_t get_total_pages_count(void)
+{
+    return paging_pages;
+}

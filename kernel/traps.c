@@ -106,7 +106,7 @@ static const char *exceptions[] = {
 void isr_handler(struct trap_frame *tf)
 {
     if (tf->int_no == 128) {
-        tf->rax = syscall_dispatcher(tf->rax, tf->rbx, tf->rcx, tf->rdx, tf);
+        tf->rax = syscall_dispatcher(tf->rax, tf->rbx, tf->rcx, tf->rdx, tf->rsi, tf);
         return;
     }
 

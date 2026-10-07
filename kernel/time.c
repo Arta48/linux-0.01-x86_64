@@ -36,7 +36,6 @@ static inline uint8_t cmos_read(uint8_t reg)
 
 #define BCD_TO_BIN(val) ((val) = ((val) & 15) + ((val) >> 4) * 10)
 
-/* Исторический алгоритм Линуса Торвальдса из Linux 0.01 (kernel/mktime.c) */
 uint64_t kernel_mktime(struct tm *tm)
 {
     uint64_t res;
@@ -57,18 +56,22 @@ void time_init(void)
 {
     struct tm t;
 
-    /* Двойное чтение для защиты от изменения минут/секунд в процессе чтения */
+    /* Ждем, если микросхема CMOS обновляет регистры прямо сейчас (бит 7 в регистре 0x0A) */
+    while (cmos_read(0x0A) & 0x80);
+
+    /* Двойное чтение для защиты от перехода секунды */
     do {
         t.tm_sec  = cmos_read(0);
         t.tm_min  = cmos_read(2);
         t.tm_hour = cmos_read(4);
         t.tm_mday = cmos_read(7);
-        t.tm_mon  = cmos_read(8) - 1; /* Месяцы 0..11 */
+        t.tm_mon  = cmos_read(8);
         t.tm_year = cmos_read(9);
     } while (t.tm_sec != cmos_read(0));
 
     uint8_t regb = cmos_read(0x0B);
     if (!(regb & 0x04)) {
+        /* Декодируем BCD ДО любых арифметических операций! */
         BCD_TO_BIN(t.tm_sec);
         BCD_TO_BIN(t.tm_min);
         BCD_TO_BIN(t.tm_hour);
@@ -76,6 +79,9 @@ void time_init(void)
         BCD_TO_BIN(t.tm_mon);
         BCD_TO_BIN(t.tm_year);
     }
+
+    /* Месяцы 0..11 для алгоритма mktime */
+    t.tm_mon -= 1;
 
     if (t.tm_year < 70) {
         t.tm_year += 2000;

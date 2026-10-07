@@ -25,11 +25,12 @@
 #define __NR_pipe    42
 #define __NR_brk     45
 #define __NR_signal  48
+#define __NR_uname   59
 #define __NR_dup2    63
 #define __NR_getcwd  79
 
 void syscall_init(void);
 int64_t sys_exit(int status);
-int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, struct trap_frame *tf);
+int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, struct trap_frame *tf);
 
 #endif

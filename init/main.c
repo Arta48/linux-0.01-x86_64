@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/signal.h>
 #include <linux/time.h>
+#include <linux/utsname.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -150,6 +151,11 @@ static inline int64_t u_list(const char *path, char *buf, uint64_t max_len, int 
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
+}
+
+static inline int64_t u_uname(struct utsname *name)
+{
+    return u_syscall(__NR_uname, (uint64_t)name, 0, 0);
 }
 
 /* Строковые вспомогательные функции */
@@ -426,6 +432,7 @@ static void execute_command(const char *cmd)
         u_print("  ps / kill / wait- process management\n");
         u_print("  bench           - benchmark 'int 0x80' vs 'syscall'\n");
         u_print("  clear / exit    - terminal control\n");
+        u_print("  uname [-a]      - print system information\n");
     } else if (u_strcmp(cmd, "date") == 0) {
         uint64_t epoch = (uint64_t)u_time();
         print_date(epoch);
@@ -613,6 +620,20 @@ static void execute_command(const char *cmd)
         u_print("syscall : "); u_print_num(t_fast); u_print(" sec\n");
     } else if (u_strcmp(cmd, "exit") == 0) {
         u_exit(0);
+    } else if (u_strncmp(cmd, "uname", 5) == 0 && (cmd[5] == ' ' || cmd[5] == '\0')) {
+        struct utsname u;
+        if (u_uname(&u) == 0) {
+            if (cmd[5] == ' ' && cmd[6] == '-' && cmd[7] == 'a') {
+                u_print(u.sysname); u_print(" ");
+                u_print(u.nodename); u_print(" ");
+                u_print(u.release); u_print(" ");
+                u_print(u.version); u_print(" ");
+                u_print(u.machine); u_print("\n");
+            } else {
+                u_print(u.sysname);
+                u_print("\n");
+            }
+        }
     } else {
         int64_t pid = u_fork();
         if (pid == 0) {

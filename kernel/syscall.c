@@ -6,6 +6,7 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/time.h>
+#include <linux/utsname.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -315,7 +316,26 @@ int64_t sys_exit(int status)
     return 0;
 }
 
-int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, struct trap_frame *tf)
+static int64_t sys_uname(struct utsname *name)
+{
+    if (!name) return -1;
+
+    const char *s_sys     = "Linux";
+    const char *s_node    = "linux64";
+    const char *s_release = "0.01-x86_64";
+    const char *s_version = "#1 PREEMPT 2026";
+    const char *s_machine = "x86_64";
+
+    memcpy(name->sysname,  s_sys,     strlen(s_sys) + 1);
+    memcpy(name->nodename, s_node,    strlen(s_node) + 1);
+    memcpy(name->release,  s_release, strlen(s_release) + 1);
+    memcpy(name->version,  s_version, strlen(s_version) + 1);
+    memcpy(name->machine,  s_machine, strlen(s_machine) + 1);
+
+    return 0;
+}
+
+int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, struct trap_frame *tf)
 {
     int64_t ret = -1;
 
@@ -372,7 +392,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             ret = 0;
             break;
         case __NR_list:
-            return sys_list((const char *)arg1, (char *)arg2, arg3, (int)tf->rbx);
+            /* ЧЕСТНЫЙ 4-й АРГУМЕНТ arg4 (is_long: 0 или 1) */
+            ret = sys_list((const char *)arg1, (char *)arg2, arg3, (int)arg4);
+            break;
         case __NR_waitpid:
             ret = sys_waitpid((int64_t)arg1, (int *)arg2, (int)arg3);
             break;
@@ -388,6 +410,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_brk:
             ret = sys_brk(arg1);
             break;
+        case __NR_uname:
+            ret = sys_uname((struct utsname *)arg1);
+            break;
         case __NR_exit:
             ret = sys_exit((int)arg1);
             break;
@@ -397,22 +422,20 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             break;
     }
 
-    /* Обработка сигналов перед возвратом в Ring 3 */
+    /* Проверка и доставка сигналов перед возвратом в Ring 3 */
     if (current->signal && current->pid > 0) {
         for (int sig = 1; sig < 32; sig++) {
             if (current->signal & (1U << sig)) {
-                current->signal &= ~(1U << sig); /* Сбрасываем сигнал */
+                current->signal &= ~(1U << sig);
 
-                if (current->sig_fn[sig] == (uint64_t)SIG_IGN) {
-                    continue; /* Игнорируем */
-                }
+                if (current->sig_fn[sig] == (uint64_t)SIG_IGN) continue;
 
                 if (current->sig_fn[sig] == (uint64_t)SIG_DFL) {
-                    /* Действие по умолчанию: завершаем процесс */
                     sys_exit(128 + sig);
                 } else {
-                    /* Пользовательский обработчик: перенаправляем RIP */
                     if (tf) {
+                        tf->rsp -= 8;
+                        *(uint64_t *)tf->rsp = tf->rip;
                         tf->rip = current->sig_fn[sig];
                     }
                 }
