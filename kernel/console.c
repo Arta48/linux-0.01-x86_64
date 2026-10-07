@@ -40,6 +40,24 @@ void console_init(void)
 
 void console_putc(char c)
 {
+    /* Очистка экрана (Form Feed / clear) */
+    if (c == '\f' || c == 12) {
+        for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
+            vga[i] = (0x07 << 8) | ' ';
+        }
+        cursor_x = 0;
+        cursor_y = 0;
+        /* ANSI escape-код очистки для терминала */
+        serial_putc('\033');
+        serial_putc('[');
+        serial_putc('2');
+        serial_putc('J');
+        serial_putc('\033');
+        serial_putc('[');
+        serial_putc('H');
+        return;
+    }
+
     if (c == '\b') {
         if (cursor_x > 0) {
             cursor_x--;
