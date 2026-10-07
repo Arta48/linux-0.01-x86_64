@@ -97,7 +97,6 @@ static void sys_ps(void)
     printk("\n");
 }
 
-/* sys_waitpid: ожидает завершения потомка и освобождает его память */
 static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
 {
     (void)options;
@@ -112,7 +111,6 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
                         *stat_addr = task[i]->exit_code;
                     }
 
-                    /* Полная утилизация: освобождаем память стека и task_struct */
                     if (task[i]->user_stack_page) {
                         free_page(task[i]->user_stack_page);
                     }
@@ -125,7 +123,6 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
         }
     }
 
-    /* Проверяем, есть ли вообще живые потомки */
     int has_children = 0;
     for (int i = 1; i < NR_TASKS; i++) {
         if (task[i] && task[i]->father == current->pid) {
@@ -142,23 +139,21 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
         goto repeat;
     }
 
-    return -1; /* Нет таких потомков */
+    return -1;
 }
 
-/* sys_kill: принудительное завершение процесса */
 static int64_t sys_kill(int64_t pid, int sig)
 {
     (void)sig;
 
     if (pid <= 1 || pid >= NR_TASKS || !task[pid]) {
-        return -1; /* Запрещено завершать Idle (0) и Shell (1) */
+        return -1;
     }
 
     if (task[pid]->state == TASK_ZOMBIE) {
         return -1;
     }
 
-    /* Закрываем файлы процесса */
     for (int i = 3; i < NR_OPEN; i++) {
         if (task[pid]->filp[i].in_use) {
             struct file *f = &task[pid]->filp[i];
@@ -175,11 +170,38 @@ static int64_t sys_kill(int64_t pid, int sig)
         }
     }
 
-    task[pid]->exit_code = 9; /* SIGKILL */
+    task[pid]->exit_code = 9;
     task[pid]->state = TASK_ZOMBIE;
     printk("\n[Process %d killed]\n", (int)pid);
 
     return 0;
+}
+
+/* sys_brk: изменение границы кучи (Program Break) */
+static int64_t sys_brk(uint64_t new_brk)
+{
+    /* Запрос текущей границы кучи (sbrk(0)) */
+    if (new_brk == 0 || new_brk < current->start_brk) {
+        return (int64_t)current->brk;
+    }
+
+    /* Расширение кучи: выделяем и маппим новые страницы */
+    if (new_brk > current->brk) {
+        uint64_t cur_page = PAGE_ALIGN(current->brk);
+        uint64_t end_page = PAGE_ALIGN(new_brk);
+
+        for (uint64_t addr = cur_page; addr < end_page; addr += PAGE_SIZE) {
+            uint64_t phys = get_free_page();
+            if (!phys) {
+                return (int64_t)current->brk; /* Out of Memory */
+            }
+            /* Маппим страницу в 4-уровневые таблицы с правами Ring 3 */
+            map_page(NULL, addr, phys, PTE_WRITABLE | PTE_USER);
+        }
+    }
+
+    current->brk = new_brk;
+    return (int64_t)current->brk;
 }
 
 static int64_t sys_exit(int status)
@@ -228,6 +250,8 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             return sys_waitpid((int64_t)arg1, (int *)arg2, (int)arg3);
         case __NR_kill:
             return sys_kill((int64_t)arg1, (int)arg2);
+        case __NR_brk:
+            return sys_brk(arg1);
         case __NR_exit:
             return sys_exit((int)arg1);
         default:

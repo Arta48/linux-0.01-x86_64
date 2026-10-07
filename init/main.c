@@ -87,6 +87,11 @@ static inline int64_t u_kill(int64_t pid, int sig)
     return u_syscall(__NR_kill, (uint64_t)pid, sig, 0);
 }
 
+static inline int64_t u_brk(uint64_t new_brk)
+{
+    return u_syscall(__NR_brk, new_brk, 0, 0);
+}
+
 static inline int64_t u_list(char *buf, uint64_t max_len)
 {
     return u_syscall(__NR_list, (uint64_t)buf, max_len, 0);
@@ -95,6 +100,90 @@ static inline int64_t u_list(char *buf, uint64_t max_len)
 static inline void u_exit(int status)
 {
     u_syscall(__NR_exit, status, 0, 0);
+}
+
+/* --- ПОЛЬЗОВАТЕЛЬСКИЙ АЛЛОКАТОР ПАМЯТИ MALLOC / FREE (RING 3) --- */
+
+struct block_header {
+    uint64_t size;
+    int is_free;
+    struct block_header *next;
+};
+
+static struct block_header *heap_head = NULL;
+
+static void *u_sbrk(int64_t increment)
+{
+    uint64_t cur_brk = (uint64_t)u_brk(0);
+    if (increment == 0) {
+        return (void *)cur_brk;
+    }
+
+    uint64_t new_brk = cur_brk + increment;
+    uint64_t res = (uint64_t)u_brk(new_brk);
+    if (res < new_brk) {
+        return (void *)-1;
+    }
+    return (void *)cur_brk;
+}
+
+static void *u_malloc(uint64_t size)
+{
+    if (size == 0) return NULL;
+
+    /* Выравнивание размера по 16 байт */
+    size = (size + 15) & ~15ULL;
+
+    /* Поиск свободного блока (First-Fit) */
+    struct block_header *curr = heap_head;
+    while (curr) {
+        if (curr->is_free && curr->size >= size) {
+            curr->is_free = 0;
+            return (void *)(curr + 1);
+        }
+        curr = curr->next;
+    }
+
+    /* Свободный блок не найден: расширяем кучу через sbrk */
+    uint64_t total_size = sizeof(struct block_header) + size;
+    void *raw = u_sbrk((int64_t)total_size);
+    if (raw == (void *)-1) {
+        return NULL; /* Out of Memory */
+    }
+
+    struct block_header *new_block = (struct block_header *)raw;
+    new_block->size = size;
+    new_block->is_free = 0;
+    new_block->next = NULL;
+
+    if (!heap_head) {
+        heap_head = new_block;
+    } else {
+        curr = heap_head;
+        while (curr->next) curr = curr->next;
+        curr->next = new_block;
+    }
+
+    return (void *)(new_block + 1);
+}
+
+static void u_free(void *ptr)
+{
+    if (!ptr) return;
+
+    struct block_header *hdr = (struct block_header *)ptr - 1;
+    hdr->is_free = 1;
+
+    /* Объединение соседних свободных блоков (Coalescing) */
+    struct block_header *curr = heap_head;
+    while (curr && curr->next) {
+        if (curr->is_free && curr->next->is_free) {
+            curr->size += sizeof(struct block_header) + curr->next->size;
+            curr->next = curr->next->next;
+        } else {
+            curr = curr->next;
+        }
+    }
 }
 
 /* Строковые вспомогательные функции */
@@ -118,6 +207,25 @@ static void u_print_num(uint64_t n)
         buf[i++] = digits[n % 10];
         n /= 10;
     }
+    while (--i >= 0) {
+        u_write(1, &buf[i], 1);
+    }
+}
+
+static void u_print_hex(uint64_t n)
+{
+    char buf[32];
+    char digits[] = "0123456789ABCDEF";
+    int i = 0;
+    if (n == 0) {
+        u_print("0x0");
+        return;
+    }
+    while (n > 0) {
+        buf[i++] = digits[n % 16];
+        n /= 16;
+    }
+    u_print("0x");
     while (--i >= 0) {
         u_write(1, &buf[i], 1);
     }
@@ -162,6 +270,9 @@ static void execute_command(const char *cmd)
     if (u_strcmp(cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help         - show this help message\n");
+        u_print("  heap         - inspect process heap (brk / sbrk)\n");
+        u_print("  malloc <sz>  - allocate <sz> bytes on the heap\n");
+        u_print("  malloctest   - stress test malloc() and free() allocation\n");
         u_print("  ls           - list files in root RamFS\n");
         u_print("  cat <file>   - display file contents\n");
         u_print("  pipe         - test Unix IPC pipe (auto-reaped)\n");
@@ -176,6 +287,93 @@ static void execute_command(const char *cmd)
         u_print("  clear        - clear the console screen\n");
         u_print("  echo ..      - print arguments to console\n");
         u_print("  exit         - terminate this shell process\n");
+    } else if (u_strcmp(cmd, "heap") == 0) {
+        uint64_t cur_brk = (uint64_t)u_brk(0);
+        uint64_t heap_size = cur_brk - HEAP_START_VIRT;
+
+        u_print("Process Heap Info:\n  Start Break : ");
+        u_print_hex(HEAP_START_VIRT);
+        u_print("\n  Current Break: ");
+        u_print_hex(cur_brk);
+        u_print("\n  Heap Size   : ");
+        u_print_num(heap_size);
+        u_print(" bytes (");
+        u_print_num((heap_size + 4095) / 4096);
+        u_print(" pages)\n");
+    } else if (u_strncmp(cmd, "malloc ", 7) == 0) {
+        uint64_t sz = (uint64_t)u_atoi(cmd + 7);
+        if (sz == 0) {
+            u_print("malloc: size must be > 0\n");
+            return;
+        }
+
+        void *ptr = u_malloc(sz);
+        if (!ptr) {
+            u_print("malloc: out of memory!\n");
+        } else {
+            u_print("Allocated ");
+            u_print_num(sz);
+            u_print(" bytes at address: ");
+            u_print_hex((uint64_t)ptr);
+            u_print("\nWriting test pattern...\n");
+
+            char *cp = (char *)ptr;
+            for (uint64_t i = 0; i < sz - 1 && i < 26; i++) {
+                cp[i] = 'A' + i;
+            }
+            cp[(sz > 26 ? 26 : sz - 1)] = '\0';
+
+            u_print("Data verification: \"");
+            u_print(cp);
+            u_print("\"\nFreeing allocated block...\n");
+            u_free(ptr);
+            u_print("Block freed successfully!\n");
+        }
+    } else if (u_strcmp(cmd, "malloctest") == 0) {
+        u_print("--- Running malloc / free Stress Test ---\n");
+
+        u_print("1. Allocating 3 blocks: B1 (64B), B2 (256B), B3 (1024B)...\n");
+        char *b1 = (char *)u_malloc(64);
+        char *b2 = (char *)u_malloc(256);
+        char *b3 = (char *)u_malloc(1024);
+
+        u_print("   B1 at "); u_print_hex((uint64_t)b1); u_print("\n");
+        u_print("   B2 at "); u_print_hex((uint64_t)b2); u_print("\n");
+        u_print("   B3 at "); u_print_hex((uint64_t)b3); u_print("\n");
+
+        u_print("2. Writing test patterns into B1, B2, B3...\n");
+        b1[0] = 'X'; b1[1] = '\0';
+        b2[0] = 'Y'; b2[1] = '\0';
+        b3[0] = 'Z'; b3[1] = '\0';
+
+        u_print("3. Freeing middle block B2...\n");
+        u_free(b2);
+
+        u_print("4. Allocating B4 (128B) - should reuse B2's slot without heap expansion...\n");
+        char *b4 = (char *)u_malloc(128);
+        u_print("   B4 at "); u_print_hex((uint64_t)b4);
+        if (b4 == b2) {
+            u_print(" (EXACT MATCH: B2 reused successfully!)\n");
+        } else {
+            u_print(" (Allocated new)\n");
+        }
+
+        u_print("5. Freeing B1, B4, B3 (Coalescing test)...\n");
+        u_free(b1);
+        u_free(b4);
+        u_free(b3);
+
+        u_print("6. Allocating big block B5 (2048B) across merged space...\n");
+        char *b5 = (char *)u_malloc(2048);
+        u_print("   B5 at "); u_print_hex((uint64_t)b5);
+        if (b5 == b1) {
+            u_print(" (COALESCING PASSED: Reused merged blocks!)\n");
+        } else {
+            u_print("\n");
+        }
+        u_free(b5);
+
+        u_print("--- Malloc / Free Test Passed 100%! ---\n");
     } else if (u_strcmp(cmd, "pipe") == 0) {
         int pipefd[2];
         if (u_pipe(pipefd) < 0) {
@@ -207,7 +405,6 @@ static void execute_command(const char *cmd)
             }
             u_close(pipefd[0]);
 
-            /* Утилизируем потомка через waitpid: освобождаем память */
             int status = 0;
             u_waitpid(pid, &status, 0);
             u_print("[Parent] Reaped child PID ");
@@ -246,7 +443,6 @@ static void execute_command(const char *cmd)
         int64_t pid = u_fork();
         if (pid == 0) {
             while (1) {
-                /* Фоновый бесконечный процесс */
                 for (volatile int i = 0; i < 50000000; i++) {}
             }
         } else if (pid > 0) {

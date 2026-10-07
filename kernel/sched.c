@@ -10,14 +10,18 @@ static union task_union init_task = {
         .state = TASK_RUNNING,
         .counter = 15,
         .priority = 15,
-        .pid = 0
+        .pid = 0,
+        .father = 0,
+        .exit_code = 0,
+        .user_stack_page = 0,
+        .start_brk = HEAP_START_VIRT,
+        .brk = HEAP_START_VIRT
     }
 };
 
 struct task_struct *current = &(init_task.task);
 struct task_struct *task[NR_TASKS] = { &(init_task.task), };
 
-/* Глобальный указатель на стек ядра текущего процесса для инструкции syscall */
 uint64_t kernel_current_stack = (uint64_t)&init_task + PAGE_SIZE;
 
 extern void switch_to(struct task_struct *prev, struct task_struct *next);
@@ -48,7 +52,17 @@ int task_create(void (*fn)(void), long priority)
     u->task.priority = priority;
     u->task.counter = priority;
     u->task.pid = i;
+    u->task.father = 0;
+    u->task.exit_code = 0;
+    u->task.user_stack_page = 0;
+    u->task.start_brk = HEAP_START_VIRT;
+    u->task.brk = HEAP_START_VIRT;
     u->task.cr3 = 0;
+
+    for (int fd = 0; fd < NR_OPEN; fd++) {
+        u->task.filp[fd].in_use = 0;
+        u->task.filp[fd].pipe = NULL;
+    }
 
     uint64_t stack_top = page + PAGE_SIZE - 8;
     uint64_t *sp = (uint64_t *)stack_top;
@@ -99,7 +113,6 @@ void schedule(void)
         struct task_struct *prev = current;
         current = task[next];
 
-        /* Обновляем вершину стека ядра как для TSS (int 0x80), так и для MSR (syscall) */
         kernel_current_stack = (uint64_t)current + PAGE_SIZE;
         set_tss_stack(kernel_current_stack);
 

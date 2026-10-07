@@ -17,6 +17,7 @@
 #define __NR_list    22
 #define __NR_kill    37
 #define __NR_pipe    42
+#define __NR_brk     45
 
 void syscall_init(void);
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, struct trap_frame *tf);
