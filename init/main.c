@@ -9,7 +9,23 @@
 #include <linux/time.h>
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
+#include <linux/kthread.h>
 #include <linux/smp.h>
+#include <linux/string.h>
+
+/* Фоновый поток ядра */
+static int kthread_heartbeat(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 3; i++) {
+        for (volatile uint64_t k = 0; k < 150000000ULL; k++) {
+            __asm__ volatile ("pause");
+        }
+        printk("[KTHREAD] Background kernel worker heartbeat #%d (CPU %d)\n",
+               i + 1, (int)smp_get_cpu_id());
+    }
+    return 0;
+}
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -29,6 +45,7 @@ static inline void sys_exit_user(int status)
 /* Task 1: Первичный процесс инициализации (Ring 3) */
 void init_process(void)
 {
+    strcpy(current->name, "init");
     char *argv[] = { "/bin/sh", NULL };
     char *envp[] = { "HOME=/", "PATH=/bin", NULL };
 
@@ -79,15 +96,19 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     fs_init();
     minix_init();
     smp_init();
+    strcpy(current->name, "idle");
+
+    /* Запуск фонового потока ядра */
+    kthread_create(kthread_heartbeat, NULL, "kworker");
 
     if (initrd_start && initrd_end) {
         tarfs_mount(initrd_start, initrd_end);
     }
 
-    task_create(user_trampoline, 10);
+    int init_pid = task_create(user_trampoline, 10);
 
     __asm__ volatile ("sti");
-    printk("[OK] System Initialized. Launching /bin/sh via Task 1...\n");
+    printk("[OK] System Initialized. Launching /bin/sh via Task %d...\n", init_pid);
 
     for (;;) {
         __asm__ volatile ("hlt");

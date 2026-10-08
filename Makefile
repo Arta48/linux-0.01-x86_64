@@ -13,10 +13,11 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o kernel/hd.o kernel/smp.o kernel/trampoline.o \
-       fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
+       kernel/kthread.o fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
-                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest rootfs/bin/smpinfo
+                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest \
+                rootfs/bin/smpinfo rootfs/bin/threadtest
 
 all: Image rootfs.tar disk.img
 
@@ -157,6 +158,16 @@ user/smpinfo.o: user/smpinfo.c user/ulibc.h
 rootfs/bin/smpinfo: user/crt0.o user/smpinfo.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/smpinfo.o user/ulibc.o -o rootfs/bin/smpinfo
+
+kernel/kthread.o: kernel/kthread.c
+	$(CC) $(CFLAGS) -c kernel/kthread.c -o kernel/kthread.o
+
+user/threadtest.o: user/threadtest.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/threadtest.c -o user/threadtest.o
+
+rootfs/bin/threadtest: user/crt0.o user/threadtest.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/threadtest.o user/ulibc.o -o rootfs/bin/threadtest
 
 disk.img:
 	@if [ ! -f disk.img ]; then \

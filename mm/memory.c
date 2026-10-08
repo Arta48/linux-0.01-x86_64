@@ -2,6 +2,9 @@
 #include <linux/traps.h>
 #include <linux/tty.h>
 #include <linux/string.h>
+#include <linux/spinlock.h>
+
+static spinlock_t mem_lock = SPINLOCK_INIT;
 
 extern char _end[];
 extern char pd_table[];
@@ -49,11 +52,13 @@ void mem_init(uint64_t reserve_end)
 
 uint64_t get_free_page(void)
 {
+    uint64_t flags = spin_lock_irqsave(&mem_lock);
     for (uint32_t i = 0; i < paging_pages; i++) {
         if (mem_map[i] == 0) {
             mem_map[i] = 1;
-            uint64_t page_addr = low_mem + ((uint64_t)i * PAGE_SIZE);
+            spin_unlock_irqrestore(&mem_lock, flags);
 
+            uint64_t page_addr = low_mem + ((uint64_t)i * PAGE_SIZE);
             uint64_t *p = (uint64_t *)page_addr;
             for (int j = 0; j < 512; j++) {
                 p[j] = 0;
@@ -61,6 +66,7 @@ uint64_t get_free_page(void)
             return page_addr;
         }
     }
+    spin_unlock_irqrestore(&mem_lock, flags);
     printk("[PANIC] Out of memory!\n");
     return 0;
 }
@@ -99,11 +105,11 @@ void free_page(uint64_t addr)
     }
 
     uint32_t index = (addr - low_mem) / PAGE_SIZE;
-    if (mem_map[index] == 0) {
-        return;
+    uint64_t flags = spin_lock_irqsave(&mem_lock);
+    if (mem_map[index] > 0) {
+        mem_map[index]--;
     }
-
-    mem_map[index]--;
+    spin_unlock_irqrestore(&mem_lock, flags);
 }
 
 void free_pages(uint64_t addr, uint32_t count)
@@ -177,6 +183,11 @@ uint64_t create_process_pml4(void)
     /* PDPT[0] указывает на общую таблицу ядра pd_table (0..1 ГБ identity map) */
     pdpt[0] = (uint64_t)pd_table | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 
+    /* Отображаем устройства ядра (Local APIC 0xFEE00000 в PDPT[3]) во все процессы */
+    extern char pdpt_table[];
+    uint64_t *boot_pdpt = (uint64_t *)pdpt_table;
+    pdpt[3] = boot_pdpt[3];
+
     return pml4_phys;
 }
 
@@ -196,6 +207,7 @@ uint64_t copy_process_pml4(uint64_t parent_pml4)
 
     /* Обходим только пользовательские диапазоны (PDPT[1..511], от 1 ГБ) */
     for (uint64_t pdpt_idx = 1; pdpt_idx < 512; pdpt_idx++) {
+        if (pdpt_idx == 3) continue; /* Пропускаем системный APIC */
         if (!(p_pdpt[pdpt_idx] & PTE_PRESENT)) continue;
 
         uint64_t *p_pd = (uint64_t *)(p_pdpt[pdpt_idx] & ~0xFFFULL);
@@ -241,6 +253,7 @@ void free_process_pml4(uint64_t pml4_phys)
 
         /* pdpt[0] - это общая таблица ядра, ее НЕ освобождаем! */
         for (uint64_t pdpt_idx = 1; pdpt_idx < 512; pdpt_idx++) {
+            if (pdpt_idx == 3) continue; /* Не трогаем системный APIC */
             if (!(pdpt[pdpt_idx] & PTE_PRESENT)) continue;
 
             uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);

@@ -7,14 +7,6 @@
 #include <linux/mm.h>
 #include <linux/hdreg.h>
 
-static inline char *strncpy(char *dest, const char *src, uint64_t n)
-{
-    char *d = dest;
-    while (n && (*d++ = *src++)) n--;
-    while (n--) *d++ = '\0';
-    return dest;
-}
-
 static struct minix_super_block sb;
 static int minix_mounted = 0;
 static uint8_t minix_dev = 0;

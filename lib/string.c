@@ -67,3 +67,18 @@ uint64_t strlen(const char *s)
     while (s[len]) len++;
     return len;
 }
+
+char *strcpy(char *dest, const char *src)
+{
+    char *d = dest;
+    while ((*d++ = *src++));
+    return dest;
+}
+
+char *strncpy(char *dest, const char *src, uint64_t n)
+{
+    char *d = dest;
+    while (n && (*d++ = *src++)) n--;
+    while (n--) *d++ = '\0';
+    return dest;
+}

@@ -199,15 +199,18 @@ static int64_t sys_time(void)
 
 static void sys_ps(void)
 {
-    printk("\nPID   PPID  UID   STATE       PRIORITY  COUNTER\n");
+    printk("\nPID   PPID  UID   STATE       PRIORITY  COUNTER  NAME\n");
     for (int i = 0; i < NR_TASKS; i++) {
         if (task[i]) {
             const char *st = "UNKNOWN";
             if (task[i]->state == TASK_RUNNING) st = "RUNNING";
             else if (task[i]->state == TASK_INTERRUPTIBLE) st = "SLEEP  ";
             else if (task[i]->state == TASK_ZOMBIE) st = "ZOMBIE ";
-            printk("%d     %d     %d     %s     %d        %d\n",
-                   task[i]->pid, task[i]->father, task[i]->uid, st, task[i]->priority, task[i]->counter);
+
+            const char *pname = task[i]->name[0] ? task[i]->name : "user";
+            printk("%d     %d     %d     %s     %d        %d        %s\n",
+                   task[i]->pid, task[i]->father, task[i]->uid, st,
+                   task[i]->priority, task[i]->counter, pname);
         }
     }
     printk("\n");

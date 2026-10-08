@@ -33,7 +33,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 
 ---
 
-## 🗺️ Реализованные этапы (Stages 1 – 36)
+## 🗺️ Реализованные этапы (Stages 1 – 37)
 
 * **Stage 1:** Multiboot-загрузка, 4-уровневый пейджинг (PML4, PDPT, PD 2MB Huge Pages), переход в Long Mode, видеовывод VGA `0xB8000` и COM1 `0x3F8`.
 * **Stage 2:** 64-битная IDT (16-байтовые шлюзы), перепрограммирование PIC 8259 на векторы 32..47, таймер PIT (100 Гц), счётчик `jiffies`.
@@ -71,6 +71,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 * **Stage 34:** Полноценная дисковая файловая система Minix v1 на `/dev/hda`: 64-битный блочный Buffer Cache (`bread`/`bwrite`/`getblk`, хэш-таблица, LRU), монтирование `/mnt`, суперблок `0x137F`, иноды, битовые карты `imap`/`zmap`, персистентное сохранение файлов между перезапусками, системный вызов `sys_sync()`, тестовая утилита `mintest`.
 * **Stage 35:** Аппаратный механизм Copy-On-Write (COW) при `sys_fork()`: разделение физических страниц между родителем и потомком с защитой от записи (`PTE_WRITABLE = 0`), счетчик ссылок в `mem_map`, динамическое дублирование страниц по Page Fault #14 (`do_page_fault`, `do_wp_page`), верификационная утилита `cowtest`.
 * **Stage 36:** Симметричная многоядерность (SMP / Symmetric Multiprocessing): инициализация Local APIC (MSR 0x1B, `0xFEE00000`), межпроцессорные прерывания INIT-SIPI-SIPI, 16-битный трамплин по адресу `0x8000`, переход ядер AP из 16-бит Real Mode в 64-бит Long Mode, параллельная работа CPU, динамический `/proc/cpuinfo`, утилита `smpinfo`.
+* **Stage 37:** Потоки ядра (Kernel Threads), спинлоки (`spinlock`) и мьютексы (`mutex`): аппаратные атомарные блокировки `spinlock_t` (`xchg`, `pause`), спящие мьютексы `mutex_t`, подсистема `kthread_create`, фоновый поток ядра `kworker`, защита аллокатора памяти `mem_lock`, утилита `threadtest`.
 
 ---
 

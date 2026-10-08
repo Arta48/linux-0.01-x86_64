@@ -36,6 +36,9 @@ struct task_struct {
     uint32_t signal;
     uint64_t sig_fn[32];
     uint64_t alarm;
+    int (*kthread_fn)(void *);
+    void *kthread_arg;
+    char name[32];
     struct file filp[NR_OPEN];
 };
 
