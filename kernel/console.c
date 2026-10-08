@@ -10,6 +10,13 @@
 static unsigned short *vga = (unsigned short *)VGA_BUFFER;
 static int cursor_x = 0;
 static int cursor_y = 0;
+static unsigned char current_attr = 0x07; /* Серый на черном */
+
+/* Состояния парсера ANSI: 0 - текст, 1 - ESC, 2 - CSI '[' */
+static int ansi_state = 0;
+#define MAX_ANSI_PAR 4
+static int ansi_par[MAX_ANSI_PAR];
+static int ansi_par_idx = 0;
 
 static void serial_init(void)
 {
@@ -31,70 +38,186 @@ static void serial_putc(char c)
 void console_init(void)
 {
     serial_init();
+    current_attr = 0x07;
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        vga[i] = (0x07 << 8) | ' ';
+        vga[i] = (current_attr << 8) | ' ';
+    }
+    cursor_x = 0;
+    cursor_y = 0;
+    ansi_state = 0;
+}
+
+static void clamp_cursor(void)
+{
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_x >= VGA_WIDTH) cursor_x = VGA_WIDTH - 1;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1;
+}
+
+static void scroll(void)
+{
+    for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
+        vga[i] = vga[i + VGA_WIDTH];
+    }
+    for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
+        vga[i] = (current_attr << 8) | ' ';
+    }
+    cursor_y = VGA_HEIGHT - 1;
+}
+
+static void vga_clear_screen(void)
+{
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
+        vga[i] = (current_attr << 8) | ' ';
     }
     cursor_x = 0;
     cursor_y = 0;
 }
 
+static void vga_clear_line_end(void)
+{
+    for (int x = cursor_x; x < VGA_WIDTH; x++) {
+        vga[cursor_y * VGA_WIDTH + x] = (current_attr << 8) | ' ';
+    }
+}
+
 void console_putc(char c)
 {
-    /* Очистка экрана (Form Feed / clear) */
-    if (c == '\f' || c == 12) {
-        for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-            vga[i] = (0x07 << 8) | ' ';
-        }
-        cursor_x = 0;
-        cursor_y = 0;
-        /* ANSI escape-код очистки для терминала */
-        serial_putc('\033');
-        serial_putc('[');
-        serial_putc('2');
-        serial_putc('J');
-        serial_putc('\033');
-        serial_putc('[');
-        serial_putc('H');
-        return;
-    }
-
+    /* Правильное затирание символа при Backspace */
     if (c == '\b') {
         if (cursor_x > 0) {
             cursor_x--;
-            vga[cursor_y * VGA_WIDTH + cursor_x] = (0x07 << 8) | ' ';
-            serial_putc('\b');
-            serial_putc(' ');
-            serial_putc('\b');
+            vga[cursor_y * VGA_WIDTH + cursor_x] = (current_attr << 8) | ' ';
+        }
+        /* В терминале: возврат влево, затирание пробелом, повторный возврат влево */
+        serial_putc('\b');
+        serial_putc(' ');
+        serial_putc('\b');
+        return;
+    }
+
+    /* Передаем символ в COM1 для терминала */
+    serial_putc(c);
+
+    /* Конечный автомат парсера ANSI для VGA */
+    if (ansi_state == 0) {
+        if (c == '\033') {
+            ansi_state = 1;
+            return;
+        }
+
+        if (c == '\f' || c == 12) {
+            vga_clear_screen();
+            return;
+        }
+
+        if (c == '\n') {
+            cursor_x = 0;
+            cursor_y++;
+        } else if (c == '\r') {
+            cursor_x = 0;
+        } else if (c == '\t') {
+            cursor_x = (cursor_x + 8) & ~7;
+            if (cursor_x >= VGA_WIDTH) {
+                cursor_x = 0;
+                cursor_y++;
+            }
+        } else if ((unsigned char)c >= 32) {
+            vga[cursor_y * VGA_WIDTH + cursor_x] = (current_attr << 8) | c;
+            cursor_x++;
+            if (cursor_x >= VGA_WIDTH) {
+                cursor_x = 0;
+                cursor_y++;
+            }
+        }
+
+        if (cursor_y >= VGA_HEIGHT) {
+            scroll();
         }
         return;
     }
 
-    if (c == '\n') {
-        serial_putc('\r');
-        serial_putc('\n');
-        cursor_x = 0;
-        cursor_y++;
-    } else if (c == '\r') {
-        serial_putc('\r');
-        cursor_x = 0;
-    } else {
-        serial_putc(c);
-        vga[cursor_y * VGA_WIDTH + cursor_x] = (0x0A << 8) | c;
-        cursor_x++;
-        if (cursor_x >= VGA_WIDTH) {
-            cursor_x = 0;
-            cursor_y++;
+    if (ansi_state == 1) {
+        if (c == '[') {
+            ansi_state = 2;
+            ansi_par_idx = 0;
+            for (int i = 0; i < MAX_ANSI_PAR; i++) ansi_par[i] = 0;
+            return;
         }
+        ansi_state = 0;
+        return;
     }
 
-    if (cursor_y >= VGA_HEIGHT) {
-        for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
-            vga[i] = vga[i + VGA_WIDTH];
+    if (ansi_state == 2) {
+        if (c >= '0' && c <= '9') {
+            ansi_par[ansi_par_idx] = ansi_par[ansi_par_idx] * 10 + (c - '0');
+            return;
         }
-        for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
-            vga[i] = (0x07 << 8) | ' ';
+        if (c == ';') {
+            if (ansi_par_idx < MAX_ANSI_PAR - 1) {
+                ansi_par_idx++;
+            }
+            return;
         }
-        cursor_y = VGA_HEIGHT - 1;
+
+        ansi_state = 0;
+        switch (c) {
+            case 'H':
+            case 'f': {
+                int r = ansi_par[0] ? ansi_par[0] - 1 : 0;
+                int col = ansi_par[1] ? ansi_par[1] - 1 : 0;
+                cursor_y = r;
+                cursor_x = col;
+                clamp_cursor();
+                break;
+            }
+            case 'J': {
+                if (ansi_par[0] == 2 || ansi_par[0] == 0) {
+                    vga_clear_screen();
+                }
+                break;
+            }
+            case 'K': {
+                vga_clear_line_end();
+                break;
+            }
+            case 'A': {
+                int count = ansi_par[0] ? ansi_par[0] : 1;
+                cursor_y -= count;
+                clamp_cursor();
+                break;
+            }
+            case 'B': {
+                int count = ansi_par[0] ? ansi_par[0] : 1;
+                cursor_y += count;
+                clamp_cursor();
+                break;
+            }
+            case 'C': {
+                int count = ansi_par[0] ? ansi_par[0] : 1;
+                cursor_x += count;
+                clamp_cursor();
+                break;
+            }
+            case 'D': {
+                int count = ansi_par[0] ? ansi_par[0] : 1;
+                cursor_x -= count;
+                clamp_cursor();
+                break;
+            }
+            case 'm': {
+                for (int i = 0; i <= ansi_par_idx; i++) {
+                    int p = ansi_par[i];
+                    if (p == 0) current_attr = 0x07;
+                    else if (p == 1) current_attr = 0x0F;
+                    else if (p == 7) current_attr = 0x70;
+                }
+                break;
+            }
+            default:
+                break;
+        }
     }
 }
 

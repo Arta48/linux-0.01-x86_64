@@ -254,7 +254,7 @@ int ramfs_create_file(const char *path, const char *data, uint64_t size, uint16_
     if (pages == 0) pages = 1;
 
     if (idx != -1) {
-        if (ram_files[idx].base.capacity < size) {
+        if (ram_files[idx].base.capacity < size || !ram_files[idx].base.data) {
             uint64_t new_page = get_free_pages(pages);
             if (!new_page) return -1;
             ram_files[idx].base.data = (char *)new_page;
@@ -415,7 +415,7 @@ void fs_init(void)
         "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n"
         "  - Multi-user authentication: UID, GID, su, chmod\n"
         "  - Shell scripts execution (sh /etc/init.sh)\n"
-        "  - Multiboot Initrd TarFS integration\n",
+        "  - Full-screen text editor (nano)\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
@@ -437,11 +437,26 @@ void fs_init(void)
         int idx = 5 + i;
         uint64_t nlen = strlen(init_names[i]);
         memcpy(ram_files[idx].base.name, init_names[i], nlen + 1);
-        ram_files[idx].base.data = (char *)init_data[i];
-        ram_files[idx].base.size = (i < 6) ? strlen(init_data[i]) : init_sizes[i];
-        ram_files[idx].base.capacity = ram_files[idx].base.size;
+
+        uint64_t init_sz = (i < 6) ? strlen(init_data[i]) : init_sizes[i];
+        uint32_t p_count = (init_sz + PAGE_SIZE - 1) / PAGE_SIZE;
+        if (p_count == 0) p_count = 1;
+
+        /* Выделяем собственные страницы памяти для каждого начального файла */
+        uint64_t p_addr = get_free_pages(p_count);
+        if (p_addr) {
+            memcpy((void *)p_addr, init_data[i], init_sz);
+            ram_files[idx].base.data = (char *)p_addr;
+            ram_files[idx].base.capacity = (uint64_t)p_count * PAGE_SIZE;
+        } else {
+            ram_files[idx].base.data = (char *)init_data[i];
+            ram_files[idx].base.capacity = init_sz;
+        }
+
+        ram_files[idx].base.size = init_sz;
         ram_files[idx].base.in_use = 1;
-        ram_files[idx].base.is_readonly = 1;
+        /* Текстовые файлы открыты для записи, бинарники - read-only */
+        ram_files[idx].base.is_readonly = (i >= 6) ? 1 : 0;
         ram_files[idx].base.is_dir = 0;
         ram_files[idx].base.mtime = startup_time;
         ram_files[idx].base.mode = (i >= 6) ? 0755 : 0644;
@@ -635,22 +650,33 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return -1;
     }
 
-    uint64_t bytes_to_write = count;
-    if (f->pos + bytes_to_write > rf->capacity) {
-        bytes_to_write = rf->capacity - f->pos;
+    /* Динамическое расширение буфера файла при нехватке памяти */
+    if (f->pos + count > rf->capacity) {
+        uint64_t needed_cap = f->pos + count;
+        uint32_t needed_pages = (needed_cap + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t new_page = get_free_pages(needed_pages);
+        if (new_page) {
+            if (rf->data && rf->size > 0) {
+                memcpy((void *)new_page, rf->data, rf->size);
+            }
+            rf->data = (char *)new_page;
+            rf->capacity = (uint64_t)needed_pages * PAGE_SIZE;
+        } else {
+            return -1;
+        }
     }
 
-    for (uint64_t i = 0; i < bytes_to_write; i++) {
+    for (uint64_t i = 0; i < count; i++) {
         rf->data[f->pos + i] = buf[i];
     }
 
-    f->pos += bytes_to_write;
+    f->pos += count;
     if (f->pos > rf->size) {
         rf->size = f->pos;
     }
     rf->mtime = get_current_time();
 
-    return bytes_to_write;
+    return count;
 }
 
 int64_t sys_unlink(const char *filename)

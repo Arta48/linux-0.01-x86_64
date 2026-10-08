@@ -14,7 +14,7 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o fs/ramfs.o fs/pipe.o lib/string.o
 
-USER_BINARIES = rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc
+USER_BINARIES = rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc rootfs/bin/nano
 
 all: Image rootfs.tar
 
@@ -72,7 +72,6 @@ mm/memory.o: mm/memory.c
 Image: $(OBJS)
 	$(LD) $(LDFLAGS) -o Image $(OBJS)
 
-# Сборка пользовательской библиотеки ulibc и программ
 user/crt0.o: user/crt0.S
 	$(CC) $(USER_CFLAGS) -c user/crt0.S -o user/crt0.o
 
@@ -88,6 +87,9 @@ user/calc.o: user/calc.c user/ulibc.h
 user/test_ulibc.o: user/test_ulibc.c user/ulibc.h
 	$(CC) $(USER_CFLAGS) -c user/test_ulibc.c -o user/test_ulibc.o
 
+user/nano.o: user/nano.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/nano.c -o user/nano.o
+
 rootfs/bin/hello: user/crt0.o user/hello.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/hello.o user/ulibc.o -o rootfs/bin/hello
@@ -99,6 +101,10 @@ rootfs/bin/calc: user/crt0.o user/calc.o user/ulibc.o user/user.ld
 rootfs/bin/test_ulibc: user/crt0.o user/test_ulibc.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/test_ulibc.o user/ulibc.o -o rootfs/bin/test_ulibc
+
+rootfs/bin/nano: user/crt0.o user/nano.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/nano.o user/ulibc.o -o rootfs/bin/nano
 
 rootfs.tar: $(USER_BINARIES)
 	@mkdir -p rootfs/etc rootfs/home rootfs/scripts

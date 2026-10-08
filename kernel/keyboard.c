@@ -12,6 +12,7 @@ static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 static int shift_pressed = 0;
 static int ctrl_pressed = 0;
+static int ext_scancode = 0;
 
 static const char kbd_map[128] = {
     0,   27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -47,11 +48,26 @@ void keyboard_init(void)
     kbd_tail = 0;
     shift_pressed = 0;
     ctrl_pressed = 0;
+    ext_scancode = 0;
+}
+
+static void kbd_push_char(char c)
+{
+    uint32_t next = (kbd_head + 1) % BUFFER_SIZE;
+    if (next != kbd_tail) {
+        kbd_buffer[kbd_head] = c;
+        kbd_head = next;
+    }
 }
 
 void keyboard_handler(void)
 {
     uint8_t scancode = inb(KBD_DATA_PORT);
+
+    if (scancode == 0xE0) {
+        ext_scancode = 1;
+        return;
+    }
 
     if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
     if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return; }
@@ -59,7 +75,39 @@ void keyboard_handler(void)
     if (scancode == 0x1D) { ctrl_pressed = 1; return; }
     if (scancode == 0x9D) { ctrl_pressed = 0; return; }
 
-    /* Ctrl+C на PS/2 клавиатуре (scancode 0x2E = 'c') */
+    /* Обработка расширенных клавиш (стрелки, Home, End) в виде ANSI-последовательностей */
+    if (ext_scancode) {
+        ext_scancode = 0;
+        if (scancode & 0x80) return; /* Отпускание */
+
+            if (scancode == 0x48) { /* Up Arrow */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('A');
+                return;
+            }
+            if (scancode == 0x50) { /* Down Arrow */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('B');
+                return;
+            }
+            if (scancode == 0x4D) { /* Right Arrow */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('C');
+                return;
+            }
+            if (scancode == 0x4B) { /* Left Arrow */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('D');
+                return;
+            }
+            if (scancode == 0x47) { /* Home */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('H');
+                return;
+            }
+            if (scancode == 0x4F) { /* End */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('F');
+                return;
+            }
+            return;
+    }
+
+    /* Сигнал SIGINT при Ctrl+C на PS/2 */
     if (ctrl_pressed && scancode == 0x2E) {
         if (current && current->pid > 0) {
             send_signal(current, SIGINT);
@@ -69,17 +117,21 @@ void keyboard_handler(void)
 
     if (scancode & 0x80) return;
 
+    /* Горячие клавиши Ctrl+X, Ctrl+O, Ctrl+K, Ctrl+U для nano */
+    if (ctrl_pressed) {
+        char base = kbd_map[scancode];
+        if (base >= 'a' && base <= 'z') {
+            kbd_push_char((char)(base - 'a' + 1));
+            return;
+        }
+    }
+
     char c = shift_pressed ? kbd_shift_map[scancode] : kbd_map[scancode];
     if (c != 0) {
-        uint32_t next = (kbd_head + 1) % BUFFER_SIZE;
-        if (next != kbd_tail) {
-            kbd_buffer[kbd_head] = c;
-            kbd_head = next;
-        }
+        kbd_push_char(c);
     }
 }
 
-/* Опрос последовательного порта (терминал stdio) */
 void check_serial_events(void)
 {
     while (inb(COM1_PORT + 5) & 0x01) {
@@ -87,21 +139,15 @@ void check_serial_events(void)
 
         if (c == 3) { /* Ctrl+C */
             if (current && current->pid > 1) {
-                /* Дочерний процесс: посылаем сигнал SIGINT */
                 send_signal(current, SIGINT);
                 continue;
             }
-            /* Если активен шелл (PID 1), передаем символ 3 для сброса строки */
         }
 
         if (c == '\r') c = '\n';
         if (c == 127)  c = '\b';
 
-        uint32_t next = (kbd_head + 1) % BUFFER_SIZE;
-        if (next != kbd_tail) {
-            kbd_buffer[kbd_head] = c;
-            kbd_head = next;
-        }
+        kbd_push_char(c);
     }
 }
 

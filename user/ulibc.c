@@ -116,6 +116,14 @@ char *strncpy(char *dest, const char *src, size_t n)
     return dest;
 }
 
+char *strcat(char *dest, const char *src)
+{
+    char *d = dest;
+    while (*d) d++;
+    while ((*d++ = *src++));
+    return dest;
+}
+
 void *memcpy(void *dest, const void *src, size_t n)
 {
     uint8_t *d = (uint8_t *)dest;
@@ -233,9 +241,9 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
             }
             case 'd':
             case 'i': {
-                int64_t val = va_arg(ap, int64_t);
+                int val = va_arg(ap, int);
                 char nb[64];
-                int nlen = format_number(nb, sizeof(nb), (uint64_t)val, 10, 1, width, pad);
+                int nlen = format_number(nb, sizeof(nb), (uint64_t)(int64_t)val, 10, 1, width, pad);
                 for (int i = 0; i < nlen; i++) {
                     if (out + 1 < size) str[out] = nb[i];
                     out++;
@@ -243,9 +251,9 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
                 break;
             }
             case 'u': {
-                uint64_t val = va_arg(ap, uint64_t);
+                unsigned int val = va_arg(ap, unsigned int);
                 char nb[64];
-                int nlen = format_number(nb, sizeof(nb), val, 10, 0, width, pad);
+                int nlen = format_number(nb, sizeof(nb), (uint64_t)val, 10, 0, width, pad);
                 for (int i = 0; i < nlen; i++) {
                     if (out + 1 < size) str[out] = nb[i];
                     out++;
@@ -254,9 +262,9 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
             }
             case 'x':
             case 'X': {
-                uint64_t val = va_arg(ap, uint64_t);
+                unsigned int val = va_arg(ap, unsigned int);
                 char nb[64];
-                int nlen = format_number(nb, sizeof(nb), val, 16, 0, width, pad);
+                int nlen = format_number(nb, sizeof(nb), (uint64_t)val, 16, 0, width, pad);
                 for (int i = 0; i < nlen; i++) {
                     if (out + 1 < size) str[out] = nb[i];
                     out++;
