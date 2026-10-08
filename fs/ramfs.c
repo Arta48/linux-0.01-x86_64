@@ -44,6 +44,8 @@ static void get_cpu_info(char *vendor, char *brand)
     }
 }
 
+extern volatile int smp_num_cpus;
+
 static void generate_cpuinfo(char *buf, uint64_t max_len)
 {
     char vendor[16];
@@ -51,18 +53,23 @@ static void generate_cpuinfo(char *buf, uint64_t max_len)
     get_cpu_info(vendor, brand);
 
     uint64_t o = 0;
-    const char *header = "processor\t: 0\nvendor_id\t: ";
-    while (*header && o < max_len - 128) buf[o++] = *header++;
-    const char *v = vendor;
-    while (*v && o < max_len - 128) buf[o++] = *v++;
+    int cpus = (smp_num_cpus > 0) ? smp_num_cpus : 1;
 
-    const char *m = "\nmodel name\t: ";
-    while (*m && o < max_len - 128) buf[o++] = *m++;
-    const char *b = brand;
-    while (*b && o < max_len - 128) buf[o++] = *b++;
-
-    const char *tail = "\ncpu MHz\t\t: 3600.00\nflags\t\t: fpu sse sse2 syscall lm\n";
-    while (*tail && o < max_len - 1) buf[o++] = *tail++;
+    for (int c = 0; c < cpus && o < max_len - 256; c++) {
+        const char *p1 = "processor\t: ";
+        while (*p1 && o < max_len - 256) buf[o++] = *p1++;
+        buf[o++] = '0' + c;
+        const char *p2 = "\nvendor_id\t: ";
+        while (*p2 && o < max_len - 256) buf[o++] = *p2++;
+        const char *v = vendor;
+        while (*v && o < max_len - 256) buf[o++] = *v++;
+        const char *m = "\nmodel name\t: ";
+        while (*m && o < max_len - 256) buf[o++] = *m++;
+        const char *b = brand;
+        while (*b && o < max_len - 256) buf[o++] = *b++;
+        const char *tail = "\ncpu MHz\t\t: 3600.00\nflags\t\t: fpu sse sse2 syscall lm smp apic\n\n";
+        while (*tail && o < max_len - 1) buf[o++] = *tail++;
+    }
     buf[o] = '\0';
 }
 

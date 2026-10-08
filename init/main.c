@@ -9,6 +9,7 @@
 #include <linux/time.h>
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
+#include <linux/smp.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -77,6 +78,7 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     ide_init();
     fs_init();
     minix_init();
+    smp_init();
 
     if (initrd_start && initrd_end) {
         tarfs_mount(initrd_start, initrd_end);

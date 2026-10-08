@@ -177,3 +177,8 @@ void isr_handler(struct trap_frame *tf)
         }
     }
 }
+
+void load_idt(void)
+{
+    __asm__ volatile ("lidt %0" : : "m"(idtr));
+}

@@ -12,11 +12,11 @@ LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
-       kernel/syscall_entry.o kernel/time.o kernel/hd.o fs/buffer.o fs/minix.o \
-       fs/ramfs.o fs/pipe.o lib/string.o
+       kernel/syscall_entry.o kernel/time.o kernel/hd.o kernel/smp.o kernel/trampoline.o \
+       fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
-                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest
+                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest rootfs/bin/smpinfo
 
 all: Image rootfs.tar disk.img
 
@@ -145,6 +145,19 @@ rootfs/bin/cowtest: user/crt0.o user/cowtest.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/cowtest.o user/ulibc.o -o rootfs/bin/cowtest
 
+kernel/smp.o: kernel/smp.c
+	$(CC) $(CFLAGS) -c kernel/smp.c -o kernel/smp.o
+
+kernel/trampoline.o: kernel/trampoline.S
+	$(CC) $(CFLAGS) -c kernel/trampoline.S -o kernel/trampoline.o
+
+user/smpinfo.o: user/smpinfo.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/smpinfo.c -o user/smpinfo.o
+
+rootfs/bin/smpinfo: user/crt0.o user/smpinfo.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/smpinfo.o user/ulibc.o -o rootfs/bin/smpinfo
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
@@ -160,7 +173,7 @@ rootfs.tar: $(USER_BINARIES)
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
 run: Image rootfs.tar disk.img
-	qemu-system-x86_64 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -serial mon:stdio
+	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -serial mon:stdio
 
 clean:
 	rm -rf $(OBJS) Image rootfs.tar rootfs user/*.o
