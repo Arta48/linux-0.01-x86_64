@@ -187,7 +187,7 @@ void fs_init(void)
         ram_files[i].base.size = 0;
         ram_files[i].base.capacity = 0;
         ram_files[i].base.mtime = startup_time;
-        ram_files[i].base.uid = 0; /* root */
+        ram_files[i].base.uid = 0;
         ram_files[i].base.gid = 0;
         ram_files[i].base.mode = 0644;
         ram_files[i].base.is_readonly = 0;
@@ -196,7 +196,6 @@ void fs_init(void)
         ram_files[i].generator = NULL;
     }
 
-    /* Системные каталоги */
     const char *dirs[] = { "/", "/bin", "/etc", "/home", "/proc" };
     for (int i = 0; i < 5; i++) {
         uint64_t len = strlen(dirs[i]);
@@ -208,9 +207,9 @@ void fs_init(void)
         ram_files[i].base.mode = 0755;
     }
 
-    /* Системные файлы */
+    /* Системные файлы, включая стартовый скрипт /etc/init.sh */
     const char *init_names[] = {
-        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/bin/hello", "/bin/calc"
+        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/etc/init.sh", "/bin/hello", "/bin/calc"
     };
     const char *init_data[] = {
         "====================================================\n"
@@ -228,33 +227,43 @@ void fs_init(void)
         "  - Signals & Ctrl+C interruption\n"
         "  - Real-Time Clock (CMOS RTC) & ls -l\n"
         "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n"
-        "  - Multi-user authentication: UID, GID, su, chmod\n",
+        "  - Multi-user authentication: UID, GID, su, chmod\n"
+        "  - Shell scripts execution (sh /etc/init.sh)\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
         "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
         "root:root:0:0:Superuser:/root\nuser:user:1000:1000:Regular User:/home\nguest:guest:1001:1001:Guest Account:/home\n",
+
+        /* Скрипт автозагрузки /etc/init.sh */
+        "# /etc/init.sh - System startup script\n"
+        "echo [INIT] Running startup script /etc/init.sh...\n"
+        "uname -a\n"
+        "export SHELL=/bin/sh\n"
+        "export HOSTNAME=linux64\n"
+        "echo [INIT] Initialization complete.\n",
+
         (const char *)bin_hello,
         (const char *)bin_calc
     };
 
-    uint64_t init_sizes[] = { 0, 0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc) };
+    uint64_t init_sizes[] = { 0, 0, 0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc) };
 
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         int idx = 5 + i;
         uint64_t nlen = strlen(init_names[i]);
         memcpy(ram_files[idx].base.name, init_names[i], nlen + 1);
         ram_files[idx].base.data = (char *)init_data[i];
-        ram_files[idx].base.size = (i < 5) ? strlen(init_data[i]) : init_sizes[i];
+        ram_files[idx].base.size = (i < 6) ? strlen(init_data[i]) : init_sizes[i];
         ram_files[idx].base.capacity = ram_files[idx].base.size;
         ram_files[idx].base.in_use = 1;
         ram_files[idx].base.is_readonly = 1;
         ram_files[idx].base.is_dir = 0;
         ram_files[idx].base.mtime = startup_time;
-        ram_files[idx].base.mode = (i >= 5) ? 0755 : 0644;
+        ram_files[idx].base.mode = (i >= 6) ? 0755 : 0644;
     }
 
-    int c_idx = 12;
+    int c_idx = 13;
     memcpy(ram_files[c_idx].base.name, "/proc/cpuinfo", 14);
     ram_files[c_idx].base.data = (char *)get_free_page();
     ram_files[c_idx].base.capacity = PAGE_SIZE;
@@ -263,7 +272,7 @@ void fs_init(void)
     ram_files[c_idx].is_proc = 1;
     ram_files[c_idx].generator = generate_cpuinfo;
 
-    int m_idx = 13;
+    int m_idx = 14;
     memcpy(ram_files[m_idx].base.name, "/proc/meminfo", 14);
     ram_files[m_idx].base.data = (char *)get_free_page();
     ram_files[m_idx].base.capacity = PAGE_SIZE;
@@ -272,7 +281,7 @@ void fs_init(void)
     ram_files[m_idx].is_proc = 1;
     ram_files[m_idx].generator = generate_meminfo;
 
-    printk("[OK] Multi-user VFS Initialized (/etc/passwd, root/user privileges)\n");
+    printk("[OK] Multi-user VFS Initialized with /etc/init.sh\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
@@ -324,7 +333,7 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].base.size = 0;
         ram_files[file_idx].base.capacity = PAGE_SIZE;
         ram_files[file_idx].base.mtime = get_current_time();
-        ram_files[file_idx].base.uid = current->euid; /* Назначаем владельца */
+        ram_files[file_idx].base.uid = current->euid;
         ram_files[file_idx].base.gid = current->egid;
         ram_files[file_idx].base.mode = 0644;
         ram_files[file_idx].base.in_use = 1;
@@ -438,9 +447,8 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return -1;
     }
 
-    /* Проверка прав: писать может владелец или root (euid == 0) */
     if (current->euid != 0 && current->euid != rf->uid) {
-        return -1; /* Permission denied */
+        return -1;
     }
 
     uint64_t bytes_to_write = count;
@@ -472,9 +480,8 @@ int64_t sys_unlink(const char *filename)
                 return -1;
             }
 
-            /* Удалять может владелец или root */
             if (current->euid != 0 && current->euid != ram_files[i].base.uid) {
-                return -1; /* Permission denied */
+                return -1;
             }
 
             if (ram_files[i].base.data) {

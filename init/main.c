@@ -8,6 +8,7 @@
 #include <linux/signal.h>
 #include <linux/time.h>
 #include <linux/utsname.h>
+#include <linux/string.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -173,7 +174,7 @@ static inline void u_exit(int status)
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* Строковые функции */
+/* Строковые вспомогательные функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -240,6 +241,25 @@ static int u_atoi(const char *s)
         s++;
     }
     return res;
+}
+
+/* Снятие обрамляющих кавычек "..." или '...' */
+static void strip_quotes(char *s)
+{
+    uint64_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r' || s[len - 1] == '\n')) {
+        s[--len] = '\0';
+    }
+    while (*s == ' ' || *s == '\t') {
+        for (uint64_t i = 0; i < len; i++) s[i] = s[i + 1];
+        len--;
+    }
+    if (len >= 2 && ((s[0] == '"' && s[len - 1] == '"') || (s[0] == '\'' && s[len - 1] == '\''))) {
+        for (uint64_t i = 0; i < len - 2; i++) {
+            s[i] = s[i + 1];
+        }
+        s[len - 2] = '\0';
+    }
 }
 
 static const char *day_names[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
@@ -413,6 +433,7 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
     while (*in && oi < max_len - 1) {
         if (*in == '$') {
             in++;
+
             if (*in == '?') {
                 char nb[16]; int ni = 0; int v = last_exit_code;
                 if (v == 0) nb[ni++] = '0';
@@ -550,6 +571,7 @@ static void execute_redirection(const char *cmd, const char *redir_pos, int appe
         r_len++;
     }
     fname[r_len] = '\0';
+    strip_quotes(fname);
 
     int64_t pid = u_fork();
     if (pid == 0) {
@@ -610,15 +632,12 @@ static void do_wc(int fd, int only_lines)
     }
 }
 
-/* Безопасное чтение пароля без эха */
 static void read_password(char *out, int max_len)
 {
     int pi = 0;
     char c;
     while (u_read(0, &c, 1) > 0) {
-        if (c == '\n') {
-            break;
-        }
+        if (c == '\n') break;
         if (c == '\b') {
             if (pi > 0) pi--;
         } else if (c >= 32 && c <= 126 && pi < max_len - 1) {
@@ -627,6 +646,64 @@ static void read_password(char *out, int max_len)
     }
     out[pi] = '\0';
     u_print("\n");
+}
+
+/* ИСПОЛНЕНИЕ ШЕЛЛ-СКРИПТОВ */
+static void execute_script(const char *filename)
+{
+    char fname[64];
+    uint64_t fni = 0;
+    while (filename[fni] && fni < 63) { fname[fni] = filename[fni]; fni++; }
+    fname[fni] = '\0';
+    strip_quotes(fname);
+
+    int64_t fd = u_open(fname, O_RDONLY);
+    if (fd < 0) {
+        u_print("sh: cannot open script: ");
+        u_print(fname);
+        u_print("\n");
+        return;
+    }
+
+    char line[128];
+    int li = 0;
+    char c;
+
+    while (u_read((int)fd, &c, 1) > 0) {
+        if (c == '\n' || c == '\r') {
+            line[li] = '\0';
+
+            /* Снимаем возможные кавычки со всей строки */
+            strip_quotes(line);
+
+            const char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+
+            /* Игнорируем комментарии # */
+            if (*p != '\0' && *p != '#') {
+                char clean_line[128];
+                int ci = 0;
+                while (*p && *p != '#' && ci < 127) {
+                    clean_line[ci++] = *p++;
+                }
+                while (ci > 0 && (clean_line[ci - 1] == ' ' || clean_line[ci - 1] == '\t')) ci--;
+                clean_line[ci] = '\0';
+
+                if (clean_line[0] != '\0') {
+                    char expanded[256];
+                    expand_vars(clean_line, expanded, sizeof(expanded));
+                    execute_command(expanded);
+                }
+            }
+            li = 0;
+        } else {
+            if (li < (int)sizeof(line) - 1) {
+                line[li++] = c;
+            }
+        }
+    }
+
+    u_close((int)fd);
 }
 
 static void execute_command(const char *cmd)
@@ -647,8 +724,17 @@ static void execute_command(const char *cmd)
         clean_cmd[clen] = '\0';
     }
 
+    /* Снимаем кавычки вокруг всей команды, если они есть */
+    strip_quotes(clean_cmd);
+
+    /* Игнорируем комментарии # */
+    const char *cm = clean_cmd;
+    while (*cm == ' ' || *cm == '\t') cm++;
+    if (*cm == '#' || *cm == '\0') return;
+
     const char *exec_cmd = clean_cmd;
 
+    /* 1. Пайп: cmd1 | cmd2 */
     const char *pipe_pos = exec_cmd;
     while (*pipe_pos && *pipe_pos != '|') pipe_pos++;
     if (*pipe_pos == '|') {
@@ -656,6 +742,7 @@ static void execute_command(const char *cmd)
         return;
     }
 
+    /* 2. Дозапись: cmd >> file */
     const char *redir_app = exec_cmd;
     while (*redir_app) {
         if (redir_app[0] == '>' && redir_app[1] == '>') {
@@ -665,6 +752,7 @@ static void execute_command(const char *cmd)
         redir_app++;
     }
 
+    /* 3. Перезапись: cmd > file */
     const char *redir_pos = exec_cmd;
     while (*redir_pos && *redir_pos != '>') redir_pos++;
     if (*redir_pos == '>') {
@@ -675,8 +763,9 @@ static void execute_command(const char *cmd)
     if (u_strcmp(exec_cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
+        u_print("  sh <script>     - execute shell script file\n");
         u_print("  whoami / id     - print current user / group info\n");
-        u_print("  su [user]       - switch user (with password check!)\n");
+        u_print("  su [user]       - switch user (password check)\n");
         u_print("  chmod <mod> <f> - change file permissions\n");
         u_print("  echo $VAR       - variable expansion ($?, $PWD, $USER)\n");
         u_print("  export K=V / env- environment variables management\n");
@@ -695,6 +784,11 @@ static void execute_command(const char *cmd)
         u_print("  ps / kill / wait- process management\n");
         u_print("  uname [-a]      - print system information\n");
         u_print("  clear / exit    - terminal control\n");
+        last_exit_code = 0;
+    } else if (u_strncmp(exec_cmd, "sh ", 3) == 0) {
+        const char *sname = exec_cmd + 3;
+        while (*sname == ' ') sname++;
+        execute_script(sname);
         last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "whoami") == 0) {
         uint16_t uid = (uint16_t)u_getuid();
@@ -732,7 +826,6 @@ static void execute_command(const char *cmd)
 
         uint16_t cur_uid = (uint16_t)u_getuid();
 
-        /* Если мы root - переключаемся сразу */
         if (cur_uid == 0) {
             u_setuid(target_uid, NULL);
             env_set("USER", uname);
@@ -740,7 +833,6 @@ static void execute_command(const char *cmd)
             return;
         }
 
-        /* Если мы обычный пользователь - запрашиваем пароль! */
         u_print("Password: ");
         char pass_buf[32];
         read_password(pass_buf, sizeof(pass_buf));
@@ -858,9 +950,15 @@ static void execute_command(const char *cmd)
         char pat[64]; int pi = 0;
         while (*p && *p != ' ' && pi < 63) pat[pi++] = *p++;
         pat[pi] = '\0';
+        strip_quotes(pat);
         while (*p == ' ') p++;
         if (*p != '\0') {
-            int64_t fd = u_open(p, O_RDONLY);
+            char fname[MAX_FILENAME];
+            int fi = 0;
+            while (*p && fi < MAX_FILENAME - 1) fname[fi++] = *p++;
+            fname[fi] = '\0';
+            strip_quotes(fname);
+            int64_t fd = u_open(fname, O_RDONLY);
             if (fd >= 0) { do_grep(pat, (int)fd); u_close((int)fd); last_exit_code = 0; }
             else { u_print("grep: open failed\n"); last_exit_code = 1; }
         } else { do_grep(pat, 0); last_exit_code = 0; }
@@ -870,20 +968,35 @@ static void execute_command(const char *cmd)
         int only_l = 0;
         if (u_strncmp(p, "-l", 2) == 0) { only_l = 1; p += 2; while (*p == ' ') p++; }
         if (*p != '\0') {
-            int64_t fd = u_open(p, O_RDONLY);
+            char fname[MAX_FILENAME];
+            int fi = 0;
+            while (*p && fi < MAX_FILENAME - 1) fname[fi++] = *p++;
+            fname[fi] = '\0';
+            strip_quotes(fname);
+            int64_t fd = u_open(fname, O_RDONLY);
             if (fd >= 0) { do_wc((int)fd, only_l); u_close((int)fd); last_exit_code = 0; }
             else { u_print("wc: open failed\n"); last_exit_code = 1; }
         } else { do_wc(0, only_l); last_exit_code = 0; }
     } else if (u_strncmp(exec_cmd, "touch ", 6) == 0) {
         const char *fname = exec_cmd + 6;
         while (*fname == ' ') fname++;
-        int64_t fd = u_open(fname, O_CREAT | O_WRONLY);
+        char cfname[MAX_FILENAME];
+        int ci = 0;
+        while (*fname && ci < MAX_FILENAME - 1) cfname[ci++] = *fname++;
+        cfname[ci] = '\0';
+        strip_quotes(cfname);
+        int64_t fd = u_open(cfname, O_CREAT | O_WRONLY);
         if (fd >= 0) { u_close((int)fd); last_exit_code = 0; }
         else last_exit_code = 1;
     } else if (u_strncmp(exec_cmd, "rm ", 3) == 0) {
         const char *fname = exec_cmd + 3;
         while (*fname == ' ') fname++;
-        if (u_unlink(fname) != 0) { u_print("rm: permission denied or file not found\n"); last_exit_code = 1; }
+        char cfname[MAX_FILENAME];
+        int ci = 0;
+        while (*fname && ci < MAX_FILENAME - 1) cfname[ci++] = *fname++;
+        cfname[ci] = '\0';
+        strip_quotes(cfname);
+        if (u_unlink(cfname) != 0) { u_print("rm: permission denied or file not found\n"); last_exit_code = 1; }
         else last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "cat") == 0) {
         char fbuf[128]; int64_t n;
@@ -895,7 +1008,12 @@ static void execute_command(const char *cmd)
     } else if (u_strncmp(exec_cmd, "cat ", 4) == 0) {
         const char *filename = exec_cmd + 4;
         while (*filename == ' ') filename++;
-        int64_t fd = u_open(filename, O_RDONLY);
+        char cfname[MAX_FILENAME];
+        int ci = 0;
+        while (*filename && ci < MAX_FILENAME - 1) cfname[ci++] = *filename++;
+        cfname[ci] = '\0';
+        strip_quotes(cfname);
+        int64_t fd = u_open(cfname, O_RDONLY);
         if (fd < 0) {
             u_print("cat: not found\n");
             last_exit_code = 1;
@@ -909,7 +1027,14 @@ static void execute_command(const char *cmd)
             last_exit_code = 0;
         }
     } else if (u_strncmp(exec_cmd, "echo ", 5) == 0) {
-        u_print(exec_cmd + 5);
+        const char *p = exec_cmd + 5;
+        while (*p == ' ') p++;
+        char msg[128];
+        int mi = 0;
+        while (p[mi] && mi < 127) { msg[mi] = p[mi]; mi++; }
+        msg[mi] = '\0';
+        strip_quotes(msg); /* Снимаем кавычки вокруг аргумента echo */
+        u_print(msg);
         u_print("\n");
         last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "date") == 0) {
@@ -962,6 +1087,16 @@ static void execute_command(const char *cmd)
     } else if (u_strcmp(exec_cmd, "exit") == 0) {
         u_exit(0);
     } else {
+        /* Если это .sh скрипт (sh test.sh или ./test.sh) */
+        uint64_t cl = 0;
+        while (exec_cmd[cl]) cl++;
+        if (cl > 3 && exec_cmd[cl - 3] == '.' && exec_cmd[cl - 2] == 's' && exec_cmd[cl - 1] == 'h') {
+            execute_script(exec_cmd);
+            last_exit_code = 0;
+            return;
+        }
+
+        /* Запуск бинарных программ */
         int64_t pid = u_fork();
         if (pid == 0) {
             int64_t err = u_execve(exec_cmd, NULL, NULL);
@@ -1024,6 +1159,9 @@ void user_init_process(void)
     u_print(banner);
 
     env_init();
+
+    /* Автозапуск сценария /etc/init.sh */
+    execute_script("/etc/init.sh");
 
     char cmd_buf[128];
     int buf_len = 0;
