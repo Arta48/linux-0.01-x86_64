@@ -1,4 +1,5 @@
 #include "ulibc.h"
+#include <linux/elf.h>
 
 #define __NR_exit    1
 #define __NR_fork    2
@@ -469,4 +470,149 @@ void free(void *ptr)
             curr = curr->next;
         }
     }
+}
+
+/* Структура дескриптора загруженной динамической библиотеки */
+struct dl_handle {
+    int in_use;
+    char path[64];
+    uint64_t base_addr;
+    uint64_t mem_size;
+    Elf64_Sym *symtab;
+    char *strtab;
+    int num_syms;
+};
+
+#define MAX_DL_HANDLES 8
+static struct dl_handle dl_handles[MAX_DL_HANDLES];
+static char dl_err_buf[64] = "";
+
+char *dlerror(void)
+{
+    return dl_err_buf[0] ? dl_err_buf : NULL;
+}
+
+void *dlopen(const char *filename, int flags)
+{
+    (void)flags;
+    dl_err_buf[0] = '\0';
+
+    int slot = -1;
+    for (int i = 0; i < MAX_DL_HANDLES; i++) {
+        if (!dl_handles[i].in_use) { slot = i; break; }
+    }
+    if (slot == -1) {
+        snprintf(dl_err_buf, sizeof(dl_err_buf), "dlopen: max handles exceeded");
+        return NULL;
+    }
+
+    struct stat st;
+    if (stat(filename, &st) != 0 || st.st_size < (uint64_t)sizeof(Elf64_Ehdr)) {
+        snprintf(dl_err_buf, sizeof(dl_err_buf), "dlopen: cannot stat %s", filename);
+        return NULL;
+    }
+
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        snprintf(dl_err_buf, sizeof(dl_err_buf), "dlopen: cannot open %s", filename);
+        return NULL;
+    }
+
+    char *file_data = (char *)malloc(st.st_size);
+    if (!file_data) { close(fd); return NULL; }
+    read(fd, file_data, st.st_size);
+    close(fd);
+
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)file_data;
+    if (ehdr->e_ident[0] != ELFMAG0 || ehdr->e_ident[1] != ELFMAG1 ||
+        ehdr->e_ident[2] != ELFMAG2 || ehdr->e_ident[3] != ELFMAG3 ||
+        ehdr->e_type != ET_DYN) {
+        snprintf(dl_err_buf, sizeof(dl_err_buf), "dlopen: not an ELF shared library");
+        free(file_data);
+        return NULL;
+    }
+
+    uint64_t min_va = 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t max_va = 0;
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        Elf64_Phdr *ph = (Elf64_Phdr *)(file_data + ehdr->e_phoff + i * ehdr->e_phentsize);
+        if (ph->p_type == PT_LOAD) {
+            if (ph->p_vaddr < min_va) min_va = ph->p_vaddr;
+            if (ph->p_vaddr + ph->p_memsz > max_va) max_va = ph->p_vaddr + ph->p_memsz;
+        }
+    }
+
+    uint64_t total_va = (max_va > min_va) ? (max_va - min_va) : 65536;
+    char *lib_mem = (char *)malloc(total_va + 4096);
+    if (!lib_mem) { free(file_data); return NULL; }
+    memset(lib_mem, 0, total_va + 4096);
+    uint64_t base = ((uint64_t)lib_mem + 4095) & ~4095ULL;
+
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        Elf64_Phdr *ph = (Elf64_Phdr *)(file_data + ehdr->e_phoff + i * ehdr->e_phentsize);
+        if (ph->p_type == PT_LOAD) {
+            memcpy((void *)(base + ph->p_vaddr), file_data + ph->p_offset, ph->p_filesz);
+        }
+    }
+
+    Elf64_Shdr *shdrs = (Elf64_Shdr *)(file_data + ehdr->e_shoff);
+    Elf64_Sym *symtab = NULL;
+    char *strtab = NULL;
+    int num_syms = 0;
+
+    for (uint16_t i = 0; i < ehdr->e_shnum; i++) {
+        if (shdrs[i].sh_type == SHT_DYNSYM) {
+            symtab = (Elf64_Sym *)(file_data + shdrs[i].sh_offset);
+            num_syms = shdrs[i].sh_size / sizeof(Elf64_Sym);
+            if (shdrs[i].sh_link < ehdr->e_shnum) {
+                strtab = file_data + shdrs[shdrs[i].sh_link].sh_offset;
+            }
+        }
+        if (shdrs[i].sh_type == SHT_RELA) {
+            Elf64_Rela *relas = (Elf64_Rela *)(file_data + shdrs[i].sh_offset);
+            int n_rel = shdrs[i].sh_size / sizeof(Elf64_Rela);
+            for (int r = 0; r < n_rel; r++) {
+                uint32_t type = ELF64_R_TYPE(relas[r].r_info);
+                if (type == R_X86_64_RELATIVE) {
+                    uint64_t *ptr = (uint64_t *)(base + relas[r].r_offset);
+                    *ptr = base + relas[r].r_addend;
+                }
+            }
+        }
+    }
+
+    dl_handles[slot].in_use = 1;
+    strncpy(dl_handles[slot].path, filename, sizeof(dl_handles[slot].path) - 1);
+    dl_handles[slot].base_addr = base;
+    dl_handles[slot].mem_size = total_va;
+    dl_handles[slot].symtab = symtab;
+    dl_handles[slot].strtab = strtab;
+    dl_handles[slot].num_syms = num_syms;
+
+    return &dl_handles[slot];
+}
+
+void *dlsym(void *handle, const char *symbol)
+{
+    if (!handle) return NULL;
+    struct dl_handle *h = (struct dl_handle *)handle;
+    if (!h->in_use || !h->symtab || !h->strtab) return NULL;
+
+    for (int i = 0; i < h->num_syms; i++) {
+        Elf64_Sym *s = &h->symtab[i];
+        const char *name = h->strtab + s->st_name;
+        if (strcmp(name, symbol) == 0) {
+            return (void *)(h->base_addr + s->st_value);
+        }
+    }
+    snprintf(dl_err_buf, sizeof(dl_err_buf), "dlsym: symbol '%s' not found", symbol);
+    return NULL;
+}
+
+int dlclose(void *handle)
+{
+    if (!handle) return -1;
+    struct dl_handle *h = (struct dl_handle *)handle;
+    h->in_use = 0;
+    return 0;
 }

@@ -4,7 +4,7 @@ CFLAGS = -Wall -Wextra -O2 -m64 -mcmodel=kernel -ffreestanding \
          -mno-red-zone -nostdinc -Iinclude
 
 USER_CFLAGS = -Wall -Wextra -O2 -m64 -ffreestanding -nostdinc \
-              -fno-stack-protector -fno-pie -no-pie -mno-red-zone -Iuser
+              -fno-stack-protector -fno-pie -no-pie -mno-red-zone -Iuser -Iinclude
 
 LD = ld
 LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
@@ -19,7 +19,8 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
                 rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest \
                 rootfs/bin/smpinfo rootfs/bin/threadtest rootfs/bin/nettest rootfs/bin/ping \
-                rootfs/bin/httpd rootfs/bin/tcc rootfs/bin/cc
+                rootfs/bin/httpd rootfs/bin/tcc rootfs/bin/cc rootfs/bin/elfhello \
+                rootfs/bin/dltest rootfs/lib/libmath.so
 
 all: Image rootfs.tar disk.img
 
@@ -215,13 +216,31 @@ rootfs/bin/cc: rootfs/bin/tcc
 	@mkdir -p rootfs/bin
 	cp rootfs/bin/tcc rootfs/bin/cc
 
+user/elfhello.o: user/elfhello.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/elfhello.c -o user/elfhello.o
+
+rootfs/bin/elfhello: user/crt0.o user/elfhello.o user/ulibc.o
+	@mkdir -p rootfs/bin
+	$(LD) -m elf_x86_64 -static user/crt0.o user/elfhello.o user/ulibc.o -o rootfs/bin/elfhello
+
+rootfs/lib/libmath.so: user/libmath.c user/ulibc.h
+	@mkdir -p rootfs/lib
+	gcc -Wall -Wextra -O2 -m64 -ffreestanding -nostdinc -fno-stack-protector -fPIC -shared -mno-red-zone -Iuser -Iinclude user/libmath.c -o rootfs/lib/libmath.so
+
+user/dltest.o: user/dltest.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/dltest.c -o user/dltest.o
+
+rootfs/bin/dltest: user/crt0.o user/dltest.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/dltest.o user/ulibc.o -o rootfs/bin/dltest
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
 	fi
 
 rootfs.tar: $(USER_BINARIES)
-	@mkdir -p rootfs/etc rootfs/home rootfs/scripts rootfs/mnt
+	@mkdir -p rootfs/etc rootfs/home rootfs/scripts rootfs/mnt rootfs/lib
 	@echo "Hello from external rootfs.tar mounted via Multiboot Initrd!" > rootfs/home/initrd_test.txt
 	@echo "#!/bin/sh" > rootfs/scripts/welcome.sh
 	@echo "echo === Executing /scripts/welcome.sh from TarFS ===" >> rootfs/scripts/welcome.sh

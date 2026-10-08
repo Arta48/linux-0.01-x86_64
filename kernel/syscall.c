@@ -9,6 +9,7 @@
 #include <linux/utsname.h>
 #include <linux/time.h>
 #include <linux/tcp.h>
+#include <linux/elf.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -329,12 +330,22 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
 
     uint64_t file_size = 0;
     const char *data = fs_get_file_data(filename, &file_size);
-    if (!data || file_size < sizeof(struct exec_header)) {
+    if (!data || file_size < 16) {
         return -1;
     }
 
     const struct exec_header *hdr = (const struct exec_header *)data;
-    if (hdr->magic != EXEC_MAGIC) {
+    int is_linus001 = (file_size >= sizeof(struct exec_header) && hdr->magic == EXEC_MAGIC);
+    const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)data;
+    int is_elf64 = 0;
+    if (file_size >= sizeof(Elf64_Ehdr) &&
+        ehdr->e_ident[0] == ELFMAG0 && ehdr->e_ident[1] == ELFMAG1 &&
+        ehdr->e_ident[2] == ELFMAG2 && ehdr->e_ident[3] == ELFMAG3 &&
+        ehdr->e_ident[4] == ELFCLASS64 && ehdr->e_machine == EM_X86_64) {
+        is_elf64 = 1;
+    }
+
+    if (!is_linus001 && !is_elf64) {
         return -1;
     }
 
@@ -366,24 +377,50 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         free_process_pml4(old_pml4);
     }
 
-    uint64_t total_mem_size = hdr->text_size;
-    if (total_mem_size < file_size) {
-        total_mem_size = file_size;
-    }
-    if (total_mem_size > 16 * 1024 * 1024) {
-        total_mem_size = 16 * 1024 * 1024;
-    }
+uint64_t entry_point = 0;
+    uint64_t max_vaddr = HEAP_START_VIRT;
 
-    uint64_t total_pages = (total_mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    for (uint64_t p = 0; p < total_pages; p++) {
-        uint64_t text_phys = get_free_page();
-        if (!text_phys) return -1;
-        map_page((uint64_t *)new_pml4, USER_TEXT_BASE + (p * PAGE_SIZE), text_phys, PTE_WRITABLE | PTE_USER);
-    }
-    memcpy((void *)USER_TEXT_BASE, data, file_size);
+    if (is_linus001) {
+        uint64_t total_mem_size = hdr->text_size;
+        if (total_mem_size < file_size) total_mem_size = file_size;
+        if (total_mem_size > 16 * 1024 * 1024) total_mem_size = 16 * 1024 * 1024;
 
-    if (total_pages * PAGE_SIZE > file_size) {
-        memset((void *)(USER_TEXT_BASE + file_size), 0, (total_pages * PAGE_SIZE) - file_size);
+        uint64_t total_pages = (total_mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (uint64_t p = 0; p < total_pages; p++) {
+            uint64_t text_phys = get_free_page();
+            if (!text_phys) return -1;
+            map_page((uint64_t *)new_pml4, USER_TEXT_BASE + (p * PAGE_SIZE), text_phys, PTE_WRITABLE | PTE_USER);
+        }
+        memcpy((void *)USER_TEXT_BASE, data, file_size);
+        if (total_pages * PAGE_SIZE > file_size) {
+            memset((void *)(USER_TEXT_BASE + file_size), 0, (total_pages * PAGE_SIZE) - file_size);
+        }
+        entry_point = hdr->entry;
+        max_vaddr = USER_TEXT_BASE + total_pages * PAGE_SIZE;
+    } else if (is_elf64) {
+        entry_point = ehdr->e_entry;
+        for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+            const Elf64_Phdr *ph = (const Elf64_Phdr *)(data + ehdr->e_phoff + i * ehdr->e_phentsize);
+            if (ph->p_type != PT_LOAD) continue;
+
+            uint64_t seg_start = ph->p_vaddr;
+            uint64_t seg_end   = ph->p_vaddr + ph->p_memsz;
+            if (seg_end > max_vaddr) max_vaddr = seg_end;
+
+            uint64_t page_start = seg_start & ~0xFFFULL;
+            uint64_t page_end   = PAGE_ALIGN(seg_end);
+
+            for (uint64_t va = page_start; va < page_end; va += PAGE_SIZE) {
+                uint64_t phys = get_free_page();
+                if (!phys) return -1;
+                map_page((uint64_t *)new_pml4, va, phys, PTE_WRITABLE | PTE_USER);
+                memset((void *)va, 0, PAGE_SIZE);
+            }
+
+            if (ph->p_filesz > 0 && ph->p_offset + ph->p_filesz <= file_size) {
+                memcpy((void *)ph->p_vaddr, data + ph->p_offset, ph->p_filesz);
+            }
+        }
     }
 
     uint64_t new_stack = get_free_pages(8);
@@ -411,10 +448,13 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     memcpy((void *)user_rsp, u_argv_ptrs, argv_table_size);
     uint64_t argv_ptr = user_rsp;
 
+    user_rsp -= sizeof(uint64_t);
+    *(uint64_t *)user_rsp = (uint64_t)argc;
+
     if ((user_rsp % 16) == 0) user_rsp -= 8;
 
-    current->start_brk = HEAP_START_VIRT;
-    current->brk = HEAP_START_VIRT;
+    current->start_brk = (max_vaddr > HEAP_START_VIRT) ? PAGE_ALIGN(max_vaddr) : HEAP_START_VIRT;
+    current->brk = current->start_brk;
 
     for (int i = 3; i < NR_OPEN; i++) {
         if (current->filp[i].in_use) {
@@ -422,7 +462,7 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         }
     }
 
-    tf->rip = hdr->entry;
+    tf->rip = entry_point;
     tf->rsp = user_rsp;
     tf->rbp = user_rsp;
     tf->rdi = (uint64_t)argc;

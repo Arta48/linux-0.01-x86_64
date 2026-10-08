@@ -99,6 +99,12 @@ int64_t list(const char *path, char *buf, size_t max_len, int is_long);
 void    ps(void);
 void    pause(void);
 
+/* Динамический компоновщик ELF (.so / Shared Libraries) */
+void   *dlopen(const char *filename, int flags);
+void   *dlsym(void *handle, const char *symbol);
+int     dlclose(void *handle);
+char   *dlerror(void);
+
 /* Строковые и служебные функции */
 size_t  strlen(const char *s);
 int     strcmp(const char *s1, const char *s2);
