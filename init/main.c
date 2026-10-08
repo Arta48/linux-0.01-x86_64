@@ -243,7 +243,6 @@ static int u_atoi(const char *s)
     return res;
 }
 
-/* Снятие обрамляющих кавычек "..." или '...' */
 static void strip_quotes(char *s)
 {
     uint64_t len = strlen(s);
@@ -316,7 +315,7 @@ static void print_date(uint64_t epoch)
 }
 
 /* ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ШЕЛЛА */
-#define MAX_ENV 16
+#define MAX_ENV 32
 struct env_var {
     char key[32];
     char val[96];
@@ -508,6 +507,133 @@ static void user_sigint_handler(int sig)
     sigint_received = 1;
 }
 
+/* ИНТЕРАКТИВНЫЙ ТЕКСТОВЫЙ РЕДАКТОР (RING 3) */
+#define MAX_ED_LINES 64
+#define MAX_ED_LEN   128
+
+static char ed_lines[MAX_ED_LINES][MAX_ED_LEN];
+static int ed_line_count = 0;
+
+static void run_editor(const char *filename)
+{
+    char fname[64];
+    uint64_t fni = 0;
+    while (filename[fni] && fni < 63) { fname[fni] = filename[fni]; fni++; }
+    fname[fni] = '\0';
+    strip_quotes(fname);
+
+    ed_line_count = 0;
+
+    /* Считываем существующий файл, если он есть */
+    int64_t fd = u_open(fname, O_RDONLY);
+    if (fd >= 0) {
+        char c;
+        int ci = 0;
+        while (u_read((int)fd, &c, 1) > 0) {
+            if (c == '\n' || c == '\r') {
+                ed_lines[ed_line_count][ci] = '\0';
+                ed_line_count++;
+                ci = 0;
+                if (ed_line_count >= MAX_ED_LINES) break;
+            } else if (ci < MAX_ED_LEN - 1) {
+                ed_lines[ed_line_count][ci++] = c;
+            }
+        }
+        if (ci > 0 && ed_line_count < MAX_ED_LINES) {
+            ed_lines[ed_line_count][ci] = '\0';
+            ed_line_count++;
+        }
+        u_close((int)fd);
+        u_print("--- Opened "); u_print(fname); u_print(" ("); u_print_num(ed_line_count); u_print(" lines) ---\n");
+    } else {
+        u_print("--- New file: "); u_print(fname); u_print(" ---\n");
+    }
+
+    u_print("Commands: 'p' (print), 'a <txt>' (append), 'i <num> <txt>' (insert), 'd <num>' (delete), 'w' (save), 'q' (quit)\n");
+
+    char cmd[128];
+    while (1) {
+        u_print("edit> ");
+        int ci = 0;
+        char c;
+        while (u_read(0, &c, 1) > 0) {
+            if (c == '\b') {
+                if (ci > 0) { ci--; u_write(1, "\b", 1); }
+            } else if (c == '\n') {
+                u_write(1, "\n", 1);
+                cmd[ci] = '\0';
+                break;
+            } else if (c >= 32 && c <= 126 && ci < 127) {
+                cmd[ci++] = c;
+                u_write(1, &c, 1);
+            }
+        }
+
+        if (cmd[0] == 'q' && cmd[1] == '\0') {
+            break;
+        } else if (cmd[0] == 'p' && cmd[1] == '\0') {
+            for (int i = 0; i < ed_line_count; i++) {
+                u_print_num(i + 1); u_print(": ");
+                u_print(ed_lines[i]); u_print("\n");
+            }
+        } else if (cmd[0] == 'a' && cmd[1] == ' ') {
+            if (ed_line_count < MAX_ED_LINES) {
+                const char *txt = cmd + 2;
+                int k = 0;
+                while (txt[k] && k < MAX_ED_LEN - 1) { ed_lines[ed_line_count][k] = txt[k]; k++; }
+                ed_lines[ed_line_count][k] = '\0';
+                ed_line_count++;
+            } else {
+                u_print("editor: buffer full!\n");
+            }
+        } else if (cmd[0] == 'i' && cmd[1] == ' ') {
+            const char *p = cmd + 2;
+            int line_num = u_atoi(p);
+            while (*p && *p != ' ') p++;
+            while (*p == ' ') p++;
+            if (line_num >= 1 && line_num <= ed_line_count + 1 && ed_line_count < MAX_ED_LINES) {
+                int idx = line_num - 1;
+                for (int k = ed_line_count; k > idx; k--) {
+                    memcpy(ed_lines[k], ed_lines[k - 1], MAX_ED_LEN);
+                }
+                int k = 0;
+                while (p[k] && k < MAX_ED_LEN - 1) { ed_lines[idx][k] = p[k]; k++; }
+                ed_lines[idx][k] = '\0';
+                ed_line_count++;
+            } else {
+                u_print("editor: invalid line number\n");
+            }
+        } else if (cmd[0] == 'd' && cmd[1] == ' ') {
+            int line_num = u_atoi(cmd + 2);
+            if (line_num >= 1 && line_num <= ed_line_count) {
+                int idx = line_num - 1;
+                for (int k = idx; k < ed_line_count - 1; k++) {
+                    memcpy(ed_lines[k], ed_lines[k + 1], MAX_ED_LEN);
+                }
+                ed_line_count--;
+            } else {
+                u_print("editor: invalid line number\n");
+            }
+        } else if (cmd[0] == 'w' && cmd[1] == '\0') {
+            int64_t wfd = u_open(fname, O_CREAT | O_WRONLY | O_TRUNC);
+            if (wfd < 0) {
+                u_print("editor: cannot save file!\n");
+            } else {
+                uint64_t total = 0;
+                for (int i = 0; i < ed_line_count; i++) {
+                    uint64_t len = strlen(ed_lines[i]);
+                    u_write((int)wfd, ed_lines[i], len);
+                    u_write((int)wfd, "\n", 1);
+                    total += len + 1;
+                }
+                u_close((int)wfd);
+                u_print("Saved "); u_print_num(ed_line_count); u_print(" lines (");
+                u_print_num(total); u_print(" bytes) to "); u_print(fname); u_print(".\n");
+            }
+        }
+    }
+}
+
 static void execute_command(const char *cmd);
 
 static void execute_pipeline(const char *cmd, const char *pipe_pos)
@@ -648,14 +774,41 @@ static void read_password(char *out, int max_len)
     u_print("\n");
 }
 
-/* ИСПОЛНЕНИЕ ШЕЛЛ-СКРИПТОВ */
-static void execute_script(const char *filename)
+/* ИСПОЛНЕНИЕ СКРИПТОВ С ПОДДЕРЖКОЙ АРГУМЕНТОВ $1, $2, $# */
+static void execute_script_args(const char *cmd_line)
 {
     char fname[64];
-    uint64_t fni = 0;
-    while (filename[fni] && fni < 63) { fname[fni] = filename[fni]; fni++; }
-    fname[fni] = '\0';
+    int fi = 0;
+    const char *p = cmd_line;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && fi < 63) fname[fi++] = *p++;
+    fname[fi] = '\0';
     strip_quotes(fname);
+
+    /* Считываем аргументы скрипта: $1, $2... */
+    int argc = 0;
+    char arg_keys[9][4] = { "1", "2", "3", "4", "5", "6", "7", "8", "9" };
+
+    while (*p) {
+        while (*p == ' ') p++;
+        if (*p == '\0') break;
+
+        char arg_val[64];
+        int ai = 0;
+        while (*p && *p != ' ' && ai < 63) arg_val[ai++] = *p++;
+        arg_val[ai] = '\0';
+        strip_quotes(arg_val);
+
+        if (argc < 9) {
+            env_set(arg_keys[argc], arg_val);
+            argc++;
+        }
+    }
+
+    char argc_str[4];
+    argc_str[0] = '0' + argc;
+    argc_str[1] = '\0';
+    env_set("#", argc_str);
 
     int64_t fd = u_open(fname, O_RDONLY);
     if (fd < 0) {
@@ -672,20 +825,15 @@ static void execute_script(const char *filename)
     while (u_read((int)fd, &c, 1) > 0) {
         if (c == '\n' || c == '\r') {
             line[li] = '\0';
-
-            /* Снимаем возможные кавычки со всей строки */
             strip_quotes(line);
 
-            const char *p = line;
-            while (*p == ' ' || *p == '\t') p++;
+            const char *lp = line;
+            while (*lp == ' ' || *lp == '\t') lp++;
 
-            /* Игнорируем комментарии # */
-            if (*p != '\0' && *p != '#') {
+            if (*lp != '\0' && *lp != '#') {
                 char clean_line[128];
                 int ci = 0;
-                while (*p && *p != '#' && ci < 127) {
-                    clean_line[ci++] = *p++;
-                }
+                while (*lp && *lp != '#' && ci < 127) clean_line[ci++] = *lp++;
                 while (ci > 0 && (clean_line[ci - 1] == ' ' || clean_line[ci - 1] == '\t')) ci--;
                 clean_line[ci] = '\0';
 
@@ -704,6 +852,12 @@ static void execute_script(const char *filename)
     }
 
     u_close((int)fd);
+
+    /* Очищаем аргументы */
+    for (int k = 0; k < argc; k++) {
+        env_unset(arg_keys[k]);
+    }
+    env_unset("#");
 }
 
 static void execute_command(const char *cmd)
@@ -724,17 +878,14 @@ static void execute_command(const char *cmd)
         clean_cmd[clen] = '\0';
     }
 
-    /* Снимаем кавычки вокруг всей команды, если они есть */
     strip_quotes(clean_cmd);
 
-    /* Игнорируем комментарии # */
     const char *cm = clean_cmd;
     while (*cm == ' ' || *cm == '\t') cm++;
     if (*cm == '#' || *cm == '\0') return;
 
     const char *exec_cmd = clean_cmd;
 
-    /* 1. Пайп: cmd1 | cmd2 */
     const char *pipe_pos = exec_cmd;
     while (*pipe_pos && *pipe_pos != '|') pipe_pos++;
     if (*pipe_pos == '|') {
@@ -742,7 +893,6 @@ static void execute_command(const char *cmd)
         return;
     }
 
-    /* 2. Дозапись: cmd >> file */
     const char *redir_app = exec_cmd;
     while (*redir_app) {
         if (redir_app[0] == '>' && redir_app[1] == '>') {
@@ -752,7 +902,6 @@ static void execute_command(const char *cmd)
         redir_app++;
     }
 
-    /* 3. Перезапись: cmd > file */
     const char *redir_pos = exec_cmd;
     while (*redir_pos && *redir_pos != '>') redir_pos++;
     if (*redir_pos == '>') {
@@ -763,7 +912,8 @@ static void execute_command(const char *cmd)
     if (u_strcmp(exec_cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
-        u_print("  sh <script>     - execute shell script file\n");
+        u_print("  edit <file>     - interactive text/script editor\n");
+        u_print("  sh <f> [args..] - execute script with $1, $2, $# parameters\n");
         u_print("  whoami / id     - print current user / group info\n");
         u_print("  su [user]       - switch user (password check)\n");
         u_print("  chmod <mod> <f> - change file permissions\n");
@@ -785,10 +935,13 @@ static void execute_command(const char *cmd)
         u_print("  uname [-a]      - print system information\n");
         u_print("  clear / exit    - terminal control\n");
         last_exit_code = 0;
+    } else if (u_strncmp(exec_cmd, "edit ", 5) == 0) {
+        const char *fname = exec_cmd + 5;
+        while (*fname == ' ') fname++;
+        run_editor(fname);
+        last_exit_code = 0;
     } else if (u_strncmp(exec_cmd, "sh ", 3) == 0) {
-        const char *sname = exec_cmd + 3;
-        while (*sname == ' ') sname++;
-        execute_script(sname);
+        execute_script_args(exec_cmd + 3);
         last_exit_code = 0;
     } else if (u_strcmp(exec_cmd, "whoami") == 0) {
         uint16_t uid = (uint16_t)u_getuid();
@@ -1033,7 +1186,7 @@ static void execute_command(const char *cmd)
         int mi = 0;
         while (p[mi] && mi < 127) { msg[mi] = p[mi]; mi++; }
         msg[mi] = '\0';
-        strip_quotes(msg); /* Снимаем кавычки вокруг аргумента echo */
+        strip_quotes(msg);
         u_print(msg);
         u_print("\n");
         last_exit_code = 0;
@@ -1087,16 +1240,14 @@ static void execute_command(const char *cmd)
     } else if (u_strcmp(exec_cmd, "exit") == 0) {
         u_exit(0);
     } else {
-        /* Если это .sh скрипт (sh test.sh или ./test.sh) */
         uint64_t cl = 0;
         while (exec_cmd[cl]) cl++;
         if (cl > 3 && exec_cmd[cl - 3] == '.' && exec_cmd[cl - 2] == 's' && exec_cmd[cl - 1] == 'h') {
-            execute_script(exec_cmd);
+            execute_script_args(exec_cmd);
             last_exit_code = 0;
             return;
         }
 
-        /* Запуск бинарных программ */
         int64_t pid = u_fork();
         if (pid == 0) {
             int64_t err = u_execve(exec_cmd, NULL, NULL);
@@ -1160,8 +1311,7 @@ void user_init_process(void)
 
     env_init();
 
-    /* Автозапуск сценария /etc/init.sh */
-    execute_script("/etc/init.sh");
+    execute_script_args("/etc/init.sh");
 
     char cmd_buf[128];
     int buf_len = 0;
