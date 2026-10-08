@@ -11,6 +11,8 @@ void net_init(void)
         e1000_get_mac(host_mac);
         printk("[OK] Ethernet Layer: Link UP, Local MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
                host_mac[0], host_mac[1], host_mac[2], host_mac[3], host_mac[4], host_mac[5]);
+        extern void net_stack_init(void);
+        net_stack_init();
     }
 }
 

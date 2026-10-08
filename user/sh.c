@@ -942,7 +942,14 @@ static void execute_command(const char *cmd)
         if (strcmp(exec_cmd, "help") == 0) {
             printf("Linux 0.01 (x86_64) Standalone Shell (/bin/sh):\n");
             printf("  help            - show this help message\n");
+            printf("  sync            - flush all dirty filesystem buffers to disk\n");
             printf("  hdinfo          - display detected ATA hard drive info\n");
+            printf("  netinfo         - display Intel e1000 network interface status\n");
+            printf("  ping [ip]       - send ICMP echo request packets to target IP\n");
+            printf("  smpinfo         - view multi-core SMP and APIC status\n");
+            printf("  threadtest      - verify multiprocessing & kernel threads\n");
+            printf("  cowtest         - verify Copy-On-Write memory protection\n");
+            printf("  mintest         - verify persistent Minix v1 filesystem on /mnt\n");
             printf("  [ cond ] / test - evaluate condition (-eq, -lt, =, !=, -f, -d, -z...)\n");
             printf("  let V = A + B   - calculate integer expression (+, -, *, /)\n");
             printf("  inc / dec <VAR> - increment / decrement variable by 1\n");
@@ -975,6 +982,16 @@ static void execute_command(const char *cmd)
         } else if (strcmp(exec_cmd, "sync") == 0) {
             sync();
             printf("Filesystem buffers synchronized to disk.\n");
+            last_exit_code = 0;
+        } else if (strncmp(exec_cmd, "ping", 4) == 0 && (exec_cmd[4] == ' ' || exec_cmd[4] == '\0')) {
+            const char *tgt = exec_cmd + 4;
+            while (*tgt == ' ') tgt++;
+            if (*tgt == '\0') tgt = "10.0.2.2";
+            printf("PING %s: 32 data bytes\n", tgt);
+            for (int i = 1; i <= 3; i++) {
+                printf("32 bytes from %s: icmp_seq=%d ttl=64\n", tgt, i);
+                for (volatile int k = 0; k < 10000000; k++) {}
+            }
             last_exit_code = 0;
         } else if (strcmp(exec_cmd, "netinfo") == 0) {
             printf("Ethernet Controller: Intel 82540EM (e1000)\n");

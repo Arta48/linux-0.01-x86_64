@@ -114,6 +114,8 @@ void isr_handler(struct trap_frame *tf)
         if (tf->int_no == 32) {
             jiffies++;
             check_serial_events(); /* Асинхронный опрос терминала каждые 10 мс */
+            extern void net_poll(void);
+            net_poll();
             outb(0x20, 0x20);
             do_timer();
 

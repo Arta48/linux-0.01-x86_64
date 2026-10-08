@@ -251,6 +251,17 @@ void printk(const char *fmt, ...)
             continue;
         }
         p++;
+        int width = 0;
+        char pad = ' ';
+        if (*p == '0') {
+            pad = '0';
+            p++;
+        }
+        while (*p >= '0' && *p <= '9') {
+            width = width * 10 + (*p - '0');
+            p++;
+        }
+
         switch (*p) {
             case 'c': {
                 char c = (char)va_arg(args, int);
@@ -259,6 +270,7 @@ void printk(const char *fmt, ...)
             }
             case 's': {
                 const char *s = va_arg(args, const char *);
+                if (!s) s = "(null)";
                 while (*s) console_putc(*s++);
                 break;
             }
@@ -271,7 +283,25 @@ void printk(const char *fmt, ...)
                 print_num(d, 10);
                 break;
             }
-            case 'x':
+            case 'x': {
+                unsigned long val = va_arg(args, unsigned long);
+                char hbuf[17];
+                int hi = 0;
+                static const char hex_chars[] = "0123456789abcdef";
+                if (val == 0) hbuf[hi++] = '0';
+                else {
+                    while (val > 0) {
+                        hbuf[hi++] = hex_chars[val & 0x0F];
+                        val >>= 4;
+                    }
+                }
+                while (hi < width) {
+                    console_putc(pad);
+                    width--;
+                }
+                while (--hi >= 0) console_putc(hbuf[hi]);
+                break;
+            }
             case 'p': {
                 console_putc('0');
                 console_putc('x');

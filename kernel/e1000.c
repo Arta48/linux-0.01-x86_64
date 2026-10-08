@@ -55,6 +55,7 @@ int e1000_init(void)
     /* Считывание аппаратного MAC-адреса из RAL/RAH */
     uint32_t low = mmio_read32(E1000_REG_RAL);
     uint32_t high = mmio_read32(E1000_REG_RAH);
+    mmio_write32(E1000_REG_RAH, high | (1U << 31)); /* Устанавливаем бит Address Valid */
     mac_addr[0] = (uint8_t)(low >> 0);
     mac_addr[1] = (uint8_t)(low >> 8);
     mac_addr[2] = (uint8_t)(low >> 16);
@@ -79,8 +80,8 @@ int e1000_init(void)
     mmio_write32(E1000_REG_RDT, E1000_NUM_RX_DESC - 1);
     rx_cur = 0;
 
-    /* Включаем прием: EN (бит 1), BAM (бит 15), BSIZE 2048 (0 << 16), SECRC (бит 26) */
-    mmio_write32(E1000_REG_RCTL, (1 << 1) | (1 << 15) | (1 << 26));
+    /* Включаем прием: EN (бит 1), UPE (бит 3), MPE (бит 4), BAM (бит 15), SECRC (бит 26) */
+    mmio_write32(E1000_REG_RCTL, (1 << 1) | (1 << 3) | (1 << 4) | (1 << 15) | (1 << 26));
 
     /* Инициализация кольца передачи (TX) */
     uint64_t tx_mem = get_free_page();
@@ -135,7 +136,7 @@ int e1000_recv(void *buf, uint16_t max_len)
 {
     if (!e1000_mmio) return 0;
 
-    uint32_t cur = (rx_cur + 1) % E1000_NUM_RX_DESC;
+    uint32_t cur = rx_cur;
     if (!(rx_descs[cur].status & 0x01)) {
         return 0; /* Нет новых пакетов */
     }
@@ -146,7 +147,7 @@ int e1000_recv(void *buf, uint16_t max_len)
     memcpy(buf, rx_buffers[cur], len);
     rx_descs[cur].status = 0;
 
-    rx_cur = cur;
-    mmio_write32(E1000_REG_RDT, rx_cur);
+    rx_cur = (rx_cur + 1) % E1000_NUM_RX_DESC;
+    mmio_write32(E1000_REG_RDT, cur);
     return len;
 }
