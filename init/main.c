@@ -5,6 +5,7 @@
 #include <linux/gdt.h>
 #include <linux/syscall.h>
 #include <linux/fs.h>
+#include <linux/minix_fs.h>
 #include <linux/time.h>
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
@@ -75,6 +76,7 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     sched_init();
     ide_init();
     fs_init();
+    minix_init();
 
     if (initrd_start && initrd_end) {
         tarfs_mount(initrd_start, initrd_end);

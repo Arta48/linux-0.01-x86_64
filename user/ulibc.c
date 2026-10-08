@@ -19,6 +19,7 @@
 #define __NR_setuid  23
 #define __NR_getuid  24
 #define __NR_pause   29
+#define __NR_sync    36
 #define __NR_kill    37
 #define __NR_mkdir   39
 #define __NR_rmdir   40
@@ -98,6 +99,7 @@ int chmod(const char *path, int mode) { return (int)syscall2(__NR_chmod, (uint64
 int kill(int pid, int sig) { return (int)syscall2(__NR_kill, pid, sig); }
 int signal(int sig, void (*handler)(int)) { return (int)syscall2(__NR_signal, sig, (uint64_t)handler); }
 int uname(struct utsname *name) { return (int)syscall1(__NR_uname, (uint64_t)name); }
+int sync(void) { return (int)syscall0(__NR_sync); }
 int64_t list(const char *path, char *buf, size_t max_len, int is_long) { return syscall4(__NR_list, (uint64_t)path, (uint64_t)buf, max_len, is_long); }
 void ps(void) { syscall0(__NR_ps); }
 void pause(void) { syscall0(__NR_pause); }

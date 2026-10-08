@@ -3,6 +3,7 @@
 #include <linux/tty.h>
 #include <linux/keyboard.h>
 #include <linux/fs.h>
+#include <linux/minix_fs.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/utsname.h>
@@ -333,7 +334,6 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         return -1;
     }
 
-    /* 1. БЕЗОПАСНО копируем аргументы argv в буфер ядра ДО модификации стека */
     int argc = 0;
     char k_argv_buf[16][64];
     while (argv && argv[argc] && argc < 15) {
@@ -351,7 +351,6 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         argc = 1;
     }
 
-    /* 2. Инициализируем чистое персональное дерево страниц для бинарника */
     uint64_t old_pml4 = current->cr3;
     uint64_t new_pml4 = create_process_pml4();
     if (!new_pml4) return -1;
@@ -363,7 +362,6 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         free_process_pml4(old_pml4);
     }
 
-    /* 3. Загружаем бинарник по адресу 0x60000000 в новом адресном пространстве */
     uint64_t total_mem_size = hdr->text_size;
     if (total_mem_size < file_size) {
         total_mem_size = file_size;
@@ -380,12 +378,10 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     }
     memcpy((void *)USER_TEXT_BASE, data, file_size);
 
-    /* Инициализируем секцию .bss нулями */
     if (total_pages * PAGE_SIZE > file_size) {
         memset((void *)(USER_TEXT_BASE + file_size), 0, (total_pages * PAGE_SIZE) - file_size);
     }
 
-    /* 4. Выделяем непрерывный стек пользователя на 32 КБ (8 страниц) */
     uint64_t new_stack = get_free_pages(8);
     if (!new_stack) return -1;
 
@@ -395,7 +391,6 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     current->user_stack_page = new_stack;
     uint64_t user_rsp = new_stack + (8 * PAGE_SIZE) - 16;
 
-    /* 5. Раскладываем строки аргументов на стеке */
     uint64_t u_argv_ptrs[18];
     for (int i = 0; i < argc; i++) {
         uint64_t slen = strlen(k_argv_buf[i]) + 1;
@@ -453,6 +448,12 @@ static int64_t sys_uname(struct utsname *name)
     return 0;
 }
 
+int64_t sys_sync(void)
+{
+    minix_sync();
+    return 0;
+}
+
 int64_t sys_exit(int status)
 {
     printk("\n[Process %d exited with status %d]\n", (int)current->pid, status);
@@ -463,7 +464,6 @@ int64_t sys_exit(int status)
         }
     }
 
-    /* Перепривязываем детей к Task 1 (init) во избежание зомби-утечек */
     for (int i = 1; i < NR_TASKS; i++) {
         if (task[i] && task[i]->father == current->pid) {
             task[i]->father = 1;
@@ -561,6 +561,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             break;
         case __NR_brk:
             ret = sys_brk(arg1);
+            break;
+        case __NR_sync:
+            ret = sys_sync();
             break;
         case __NR_uname:
             ret = sys_uname((struct utsname *)arg1);

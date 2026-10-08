@@ -23,6 +23,7 @@
 #define __NR_setuid  23
 #define __NR_getuid  24
 #define __NR_pause   29
+#define __NR_sync    36
 #define __NR_kill    37
 #define __NR_mkdir   39
 #define __NR_rmdir   40
@@ -35,6 +36,7 @@
 
 void syscall_init(void);
 int64_t sys_exit(int status);
+int64_t sys_sync(void);
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, struct trap_frame *tf);
 
 #endif

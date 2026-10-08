@@ -12,9 +12,11 @@ LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
-       kernel/syscall_entry.o kernel/time.o kernel/hd.o fs/ramfs.o fs/pipe.o lib/string.o
+       kernel/syscall_entry.o kernel/time.o kernel/hd.o fs/buffer.o fs/minix.o \
+       fs/ramfs.o fs/pipe.o lib/string.o
 
-USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc rootfs/bin/nano rootfs/bin/hdtest
+USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
+                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest
 
 all: Image rootfs.tar disk.img
 
@@ -47,6 +49,12 @@ kernel/time.o: kernel/time.c
 
 kernel/hd.o: kernel/hd.c
 	$(CC) $(CFLAGS) -c kernel/hd.c -o kernel/hd.o
+
+fs/buffer.o: fs/buffer.c
+	$(CC) $(CFLAGS) -c fs/buffer.c -o fs/buffer.o
+
+fs/minix.o: fs/minix.c
+	$(CC) $(CFLAGS) -c fs/minix.c -o fs/minix.o
 
 fs/ramfs.o: fs/ramfs.c
 	$(CC) $(CFLAGS) -c fs/ramfs.c -o fs/ramfs.o
@@ -99,6 +107,9 @@ user/nano.o: user/nano.c user/ulibc.h
 user/hdtest.o: user/hdtest.c user/ulibc.h
 	$(CC) $(USER_CFLAGS) -c user/hdtest.c -o user/hdtest.o
 
+user/mintest.o: user/mintest.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/mintest.c -o user/mintest.o
+
 rootfs/bin/sh: user/crt0.o user/sh.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/sh.o user/ulibc.o -o rootfs/bin/sh
@@ -123,54 +134,26 @@ rootfs/bin/hdtest: user/crt0.o user/hdtest.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/hdtest.o user/ulibc.o -o rootfs/bin/hdtest
 
+rootfs/bin/mintest: user/crt0.o user/mintest.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/mintest.o user/ulibc.o -o rootfs/bin/mintest
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
 	fi
 
 rootfs.tar: $(USER_BINARIES)
-	@mkdir -p rootfs/etc rootfs/home rootfs/scripts
+	@mkdir -p rootfs/etc rootfs/home rootfs/scripts rootfs/mnt
 	@echo "Hello from external rootfs.tar mounted via Multiboot Initrd!" > rootfs/home/initrd_test.txt
 	@echo "#!/bin/sh" > rootfs/scripts/welcome.sh
 	@echo "echo === Executing /scripts/welcome.sh from TarFS ===" >> rootfs/scripts/welcome.sh
 	@echo "uname -a" >> rootfs/scripts/welcome.sh
 	@echo "echo Initrd TarFS is fully operational!" >> rootfs/scripts/welcome.sh
-	@echo "#!/bin/sh" > rootfs/scripts/test_control.sh
-	@echo "echo === 1. Testing Conditionals (if / then / else / fi) ===" >> rootfs/scripts/test_control.sh
-	@echo "VAL=10" >> rootfs/scripts/test_control.sh
-	@echo "if [ \$$VAL -gt 5 ]" >> rootfs/scripts/test_control.sh
-	@echo "then" >> rootfs/scripts/test_control.sh
-	@echo "    echo [PASS] VAL is greater than 5" >> rootfs/scripts/test_control.sh
-	@echo "else" >> rootfs/scripts/test_control.sh
-	@echo "    echo [FAIL] VAL is not greater than 5" >> rootfs/scripts/test_control.sh
-	@echo "fi" >> rootfs/scripts/test_control.sh
-	@echo "if [ -f /etc/passwd ]" >> rootfs/scripts/test_control.sh
-	@echo "then" >> rootfs/scripts/test_control.sh
-	@echo "    echo [PASS] /etc/passwd exists" >> rootfs/scripts/test_control.sh
-	@echo "fi" >> rootfs/scripts/test_control.sh
-	@echo "if [ -d /nonexistent ]" >> rootfs/scripts/test_control.sh
-	@echo "then" >> rootfs/scripts/test_control.sh
-	@echo "    echo [FAIL] Directory should not exist" >> rootfs/scripts/test_control.sh
-	@echo "else" >> rootfs/scripts/test_control.sh
-	@echo "    echo [PASS] /nonexistent correctly detected as absent" >> rootfs/scripts/test_control.sh
-	@echo "fi" >> rootfs/scripts/test_control.sh
-	@echo "echo === 2. Testing For Loop ===" >> rootfs/scripts/test_control.sh
-	@echo "for item in alpha beta gamma" >> rootfs/scripts/test_control.sh
-	@echo "do" >> rootfs/scripts/test_control.sh
-	@echo "    echo Item: \$$item" >> rootfs/scripts/test_control.sh
-	@echo "done" >> rootfs/scripts/test_control.sh
-	@echo "echo === 3. Testing While Loop and let ===" >> rootfs/scripts/test_control.sh
-	@echo "NUM=1" >> rootfs/scripts/test_control.sh
-	@echo "while [ \$$NUM -le 3 ]" >> rootfs/scripts/test_control.sh
-	@echo "do" >> rootfs/scripts/test_control.sh
-	@echo "    echo Loop step: \$$NUM" >> rootfs/scripts/test_control.sh
-	@echo "    let NUM = \$$NUM + 1" >> rootfs/scripts/test_control.sh
-	@echo "done" >> rootfs/scripts/test_control.sh
-	@echo "echo === All Stage 30 control tests passed! ===" >> rootfs/scripts/test_control.sh
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
 run: Image rootfs.tar disk.img
 	qemu-system-x86_64 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -serial mon:stdio
 
 clean:
-	rm -rf $(OBJS) Image rootfs.tar rootfs disk.img user/*.o
+	rm -rf $(OBJS) Image rootfs.tar rootfs user/*.o

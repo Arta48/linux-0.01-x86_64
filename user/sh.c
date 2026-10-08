@@ -972,6 +972,10 @@ static void execute_command(const char *cmd)
             printf("  uname [-a]      - print system information\n");
             printf("  clear / exit    - terminal control\n");
             last_exit_code = 0;
+        } else if (strcmp(exec_cmd, "sync") == 0) {
+            sync();
+            printf("Filesystem buffers synchronized to disk.\n");
+            last_exit_code = 0;
         } else if (strcmp(exec_cmd, "hdinfo") == 0) {
             int fd = open("/dev/hda", O_RDONLY);
             if (fd < 0) {

@@ -1,4 +1,5 @@
 #include <linux/fs.h>
+#include <linux/minix_fs.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/string.h>
@@ -6,69 +7,6 @@
 #include <linux/time.h>
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
-
-static const unsigned char bin_hello[] = {
-    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
-    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
-    0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x48, 0x83, 0xff, 0x01,
-    0x7e, 0x63,
-    0x48, 0x89, 0xf3,
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    0x48, 0x8d, 0x35, 0x79, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc2, 0x07, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    0x48, 0x8b, 0x73, 0x08,
-    0x48, 0x31, 0xd2,
-    0x80, 0x3c, 0x16, 0x00,
-    0x74, 0x05,
-    0x48, 0xff, 0xc2,
-    0xeb, 0xf5,
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    0x48, 0x8d, 0x35, 0x40, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc2, 0x02, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    0xeb, 0x1e,
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    0x48, 0x8d, 0x35, 0x22, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc2, 0x30, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc7, 0x2a, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    'H', 'e', 'l', 'l', 'o', ',', ' ',
-    '!', '\n',
-    'H', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ',
-    's', 't', 'a', 'n', 'd', 'a', 'l', 'o', 'n', 'e', ' ',
-    'b', 'i', 'n', 'a', 'r', 'y', ' ', 'l', 'o', 'a', 'd', 'e', 'd', ' ',
-    'b', 'y', ' ', 'e', 'x', 'e', 'c', 'v', 'e', '!', '\n'
-};
-
-static const unsigned char bin_calc[] = {
-    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
-    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
-    0x4C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
-    0x48, 0x8d, 0x35, 0x24, 0x00, 0x00, 0x00,
-    0x48, 0xc7, 0xc2, 0x2c, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    0x48, 0xc7, 0xc0, 0x0a, 0x00, 0x00, 0x00,
-    0x48, 0x05, 0x14, 0x00, 0x00, 0x00,
-    0x48, 0x6b, 0xc0, 0x03,
-    0x48, 0x89, 0xc7,
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,
-    0x0f, 0x05,
-    '[', 'C', 'A', 'L', 'C', ']', ' ', 'C', 'o', 'm', 'p', 'u', 't', 'i', 'n', 'g', ' ',
-    '(', '1', '0', ' ', '+', ' ', '2', '0', ')', ' ', '*', ' ', '3', ' ', 'i', 'n', ' ',
-    'R', 'i', 'n', 'g', ' ', '3', '.', '.', '.', '\n', '\0'
-};
 
 struct proc_ram_file {
     struct ram_file base;
@@ -205,10 +143,23 @@ static void resolve_path(const char *in, char *out)
     memcpy(out, tmp, ti + 1);
 }
 
+static inline int is_minix_path(const char *path)
+{
+    return (strncmp(path, "/mnt", 4) == 0 && (path[4] == '/' || path[4] == '\0'));
+}
+
 int ramfs_create_dir(const char *path, uint16_t mode)
 {
     char full[MAX_FILENAME];
     resolve_path(path, full);
+
+    if (strcmp(full, "/mnt") == 0 || strcmp(full, "/mnt/") == 0) {
+        return 0;
+    }
+
+    if (is_minix_path(full)) {
+        return minix_sys_mkdir(full, mode);
+    }
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
@@ -387,19 +338,20 @@ void fs_init(void)
         ram_files[i].generator = NULL;
     }
 
-    const char *dirs[] = { "/", "/bin", "/etc", "/home", "/proc", "/dev" };
-    for (int i = 0; i < 6; i++) {
+    /* Точки монтирования и стандартные каталоги: добавлен /mnt */
+    const char *dirs[] = { "/", "/bin", "/etc", "/home", "/proc", "/dev", "/mnt" };
+    for (int i = 0; i < 7; i++) {
         uint64_t len = strlen(dirs[i]);
         memcpy(ram_files[i].base.name, dirs[i], len + 1);
         ram_files[i].base.is_dir = 1;
         ram_files[i].base.in_use = 1;
-        ram_files[i].base.is_readonly = 1;
+        ram_files[i].base.is_readonly = (i == 6) ? 0 : 1; /* /mnt доступен для монтирования */
         ram_files[i].base.mtime = startup_time;
         ram_files[i].base.mode = 0755;
     }
 
     const char *init_names[] = {
-        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/etc/init.sh", "/bin/hello", "/bin/calc"
+        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/etc/init.sh"
     };
     const char *init_data[] = {
         "====================================================\n"
@@ -408,19 +360,14 @@ void fs_init(void)
         "====================================================\n"
         "Features:\n"
         "  - 4-level paging (PML4, PDPT, PD, PT)\n"
+        "  - Per-process isolated address spaces (CR3 isolation)\n"
         "  - Preemptive multitasking & decay scheduler\n"
         "  - Ring 3 user space isolation via TSS.rsp0\n"
         "  - Fast hardware MSR syscall / sysret\n"
-        "  - Dynamic VFS with directories, cd, pwd & mkdir\n"
-        "  - Unix Pipes (IPC) & dup2 redirection (> and |)\n"
-        "  - Binary execution via fork() + execve(argc, argv)\n"
-        "  - Signals & Ctrl+C interruption\n"
-        "  - Real-Time Clock (CMOS RTC) & ls -l\n"
-        "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n"
-        "  - Multi-user authentication: UID, GID, su, chmod\n"
-        "  - Shell scripts execution (sh /etc/init.sh)\n"
-        "  - Full-screen text editor (nano)\n"
-        "  - 64-bit IDE / ATA Hard Disk driver (/dev/hda)\n",
+        "  - Minix v1 Disk Filesystem mounted on /mnt\n"
+        "  - Buffer Cache (1024B blocks, hash table, LRU)\n"
+        "  - Persistent files & directories across reboots\n"
+        "  - Shell scripts execution & full-screen nano\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
@@ -431,19 +378,16 @@ void fs_init(void)
         "uname -a\n"
         "export SHELL=/bin/sh\n"
         "export HOSTNAME=linux64\n"
-        "echo [INIT] Initialization complete.\n",
-        (const char *)bin_hello,
-        (const char *)bin_calc
+        "echo [INIT] Minix v1 persistence active on /mnt\n"
+        "echo [INIT] Initialization complete.\n"
     };
 
-    uint64_t init_sizes[] = { 0, 0, 0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc) };
-
-    for (int i = 0; i < 8; i++) {
-        int idx = 6 + i;
+    for (int i = 0; i < 6; i++) {
+        int idx = 7 + i;
         uint64_t nlen = strlen(init_names[i]);
         memcpy(ram_files[idx].base.name, init_names[i], nlen + 1);
 
-        uint64_t init_sz = (i < 6) ? strlen(init_data[i]) : init_sizes[i];
+        uint64_t init_sz = strlen(init_data[i]);
         uint32_t p_count = (init_sz + PAGE_SIZE - 1) / PAGE_SIZE;
         if (p_count == 0) p_count = 1;
 
@@ -459,14 +403,14 @@ void fs_init(void)
 
         ram_files[idx].base.size = init_sz;
         ram_files[idx].base.in_use = 1;
-        ram_files[idx].base.is_readonly = (i >= 6) ? 1 : 0;
+        ram_files[idx].base.is_readonly = 0;
         ram_files[idx].base.is_dir = 0;
         ram_files[idx].base.is_dev_blk = 0;
         ram_files[idx].base.mtime = startup_time;
-        ram_files[idx].base.mode = (i >= 6) ? 0755 : 0644;
+        ram_files[idx].base.mode = 0644;
     }
 
-    int c_idx = 14;
+    int c_idx = 13;
     memcpy(ram_files[c_idx].base.name, "/proc/cpuinfo", 14);
     ram_files[c_idx].base.data = (char *)get_free_page();
     ram_files[c_idx].base.capacity = PAGE_SIZE;
@@ -475,7 +419,7 @@ void fs_init(void)
     ram_files[c_idx].is_proc = 1;
     ram_files[c_idx].generator = generate_cpuinfo;
 
-    int m_idx = 15;
+    int m_idx = 14;
     memcpy(ram_files[m_idx].base.name, "/proc/meminfo", 14);
     ram_files[m_idx].base.data = (char *)get_free_page();
     ram_files[m_idx].base.capacity = PAGE_SIZE;
@@ -485,7 +429,7 @@ void fs_init(void)
     ram_files[m_idx].generator = generate_meminfo;
 
     /* Блочное устройство /dev/hda для жесткого диска */
-    int hd_idx = 16;
+    int hd_idx = 15;
     const struct hd_drive_info *hd = ide_get_drive(0);
     memcpy(ram_files[hd_idx].base.name, "/dev/hda", 9);
     ram_files[hd_idx].base.data = NULL;
@@ -498,13 +442,17 @@ void fs_init(void)
     ram_files[hd_idx].base.dev_id = 0;
     ram_files[hd_idx].base.mode = 0660;
 
-    printk("[OK] Multi-user VFS Initialized (/dev/hda active)\n");
+    printk("[OK] Multi-user VFS Initialized (/mnt ready for Minix FS)\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
 {
     char full[MAX_FILENAME];
     resolve_path(name, full);
+
+    if (is_minix_path(full)) {
+        return minix_get_file_data(full, out_size);
+    }
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && !ram_files[i].base.is_dir && strcmp(full, ram_files[i].base.name) == 0) {
@@ -523,6 +471,28 @@ int64_t sys_open(const char *filename, int flags)
 {
     char full[MAX_FILENAME];
     resolve_path(filename, full);
+
+    if (is_minix_path(full)) {
+        uint32_t minix_ino = 0;
+        uint64_t fsz = 0;
+        if (minix_sys_open(full, flags, 0644, &minix_ino, &fsz) < 0) {
+            return -1;
+        }
+
+        for (int fd = 3; fd < NR_OPEN; fd++) {
+            if (!current->filp[fd].in_use) {
+                current->filp[fd].type = FILE_TYPE_MINIX;
+                current->filp[fd].rf = NULL;
+                current->filp[fd].pipe = NULL;
+                current->filp[fd].minix_ino = minix_ino;
+                current->filp[fd].pos = (flags & O_APPEND) ? fsz : 0;
+                current->filp[fd].in_use = 1;
+                current->filp[fd].mode = (flags & 3) ? (flags & 3) : 1;
+                return fd;
+            }
+        }
+        return -1;
+    }
 
     int file_idx = -1;
     for (int i = 0; i < MAX_FILES; i++) {
@@ -615,6 +585,7 @@ int64_t sys_close(int fd)
     f->mode = 0;
     f->rf = NULL;
     f->pipe = NULL;
+    f->minix_ino = 0;
     return 0;
 }
 
@@ -630,10 +601,14 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
         return pipe_read(f, buf, count);
     }
 
+    if (f->type == FILE_TYPE_MINIX) {
+        return minix_file_read(f->minix_ino, &f->pos, buf, count);
+    }
+
     struct ram_file *rf = f->rf;
     if (!rf) return -1;
 
-    /* Чтение блочного устройства (/dev/hda) через драйвер ATA */
+    /* Чтение блочного устройства (/dev/hda) */
     if (rf->is_dev_blk) {
         if (f->pos >= rf->size) return 0;
         uint64_t bytes_to_read = count;
@@ -690,6 +665,10 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return pipe_write(f, buf, count);
     }
 
+    if (f->type == FILE_TYPE_MINIX) {
+        return minix_file_write(f->minix_ino, &f->pos, buf, count);
+    }
+
     struct ram_file *rf = f->rf;
     if (!rf || rf->is_readonly) {
         return -1;
@@ -699,7 +678,7 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return -1;
     }
 
-    /* Запись в блочное устройство (/dev/hda) через драйвер ATA */
+    /* Запись в блочное устройство (/dev/hda) */
     if (rf->is_dev_blk) {
         uint64_t lba = f->pos / 512;
         uint64_t offset = f->pos % 512;
@@ -713,7 +692,6 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
             }
 
             if (offset != 0 || chunk < 512) {
-                /* При невыровненной записи сначала считываем сектор */
                 ide_read_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf);
             }
             memcpy(sec_buf + offset, buf + written_bytes, chunk);
@@ -730,7 +708,6 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return written_bytes;
     }
 
-    /* Динамическое расширение буфера обычного файла при нехватке памяти */
     if (f->pos + count > rf->capacity) {
         uint64_t needed_cap = f->pos + count;
         uint32_t needed_pages = (needed_cap + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -763,6 +740,10 @@ int64_t sys_unlink(const char *filename)
 {
     char full[MAX_FILENAME];
     resolve_path(filename, full);
+
+    if (is_minix_path(full)) {
+        return minix_sys_unlink(full);
+    }
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
@@ -812,6 +793,10 @@ int64_t sys_stat(const char *filename, struct stat *statbuf)
     char full[MAX_FILENAME];
     resolve_path(filename, full);
 
+    if (is_minix_path(full)) {
+        return minix_sys_stat(full, statbuf);
+    }
+
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
             statbuf->st_dev   = 1;
@@ -834,6 +819,13 @@ int64_t sys_chdir(const char *path)
     char full[MAX_FILENAME];
     resolve_path(path, full);
 
+    if (is_minix_path(full)) {
+        if (!minix_is_dir(full)) return -1;
+        uint64_t len = strlen(full);
+        memcpy(current->cwd, full, len + 1);
+        return 0;
+    }
+
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && ram_files[i].base.is_dir && strcmp(full, ram_files[i].base.name) == 0) {
             uint64_t len = strlen(full);
@@ -853,6 +845,10 @@ int64_t sys_rmdir(const char *path)
 {
     char full[MAX_FILENAME];
     resolve_path(path, full);
+
+    if (is_minix_path(full)) {
+        return minix_sys_rmdir(full);
+    }
 
     if (strcmp(full, "/") == 0) return -1;
 
@@ -896,6 +892,10 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
         resolve_path(dir_path, target);
     } else {
         memcpy(target, current->cwd, strlen(current->cwd) + 1);
+    }
+
+    if (is_minix_path(target)) {
+        return minix_sys_list(target, buf, max_len, is_long);
     }
 
     uint64_t tlen = strlen(target);

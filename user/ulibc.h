@@ -90,6 +90,7 @@ int     chmod(const char *path, int mode);
 int     kill(int pid, int sig);
 int     signal(int sig, void (*handler)(int));
 int     uname(struct utsname *name);
+int     sync(void);
 int64_t list(const char *path, char *buf, size_t max_len, int is_long);
 void    ps(void);
 void    pause(void);
