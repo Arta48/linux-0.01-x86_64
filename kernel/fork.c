@@ -35,7 +35,7 @@ int64_t sys_fork(struct trap_frame *tf)
     child->exit_code = 0;
     child->state = TASK_RUNNING;
     child->counter = child->priority;
-    child->signal = 0; /* Очищаем ожидающие сигналы */
+    child->signal = 0;
     child->alarm = 0;
     memcpy(child->cwd, current->cwd, sizeof(current->cwd));
 
@@ -51,16 +51,20 @@ int64_t sys_fork(struct trap_frame *tf)
         }
     }
 
-    uint64_t parent_user_stack_page = tf->rsp & ~0xFFFULL;
-    uint64_t child_user_stack_page = get_free_page();
+    /* Выделяем непрерывные 32 КБ для стека ребенка */
+    uint64_t parent_user_stack_page = current->user_stack_page;
+    if (!parent_user_stack_page) {
+        parent_user_stack_page = tf->rsp & ~0xFFFULL;
+    }
+
+    uint64_t child_user_stack_page = get_free_pages(8);
     if (!child_user_stack_page) {
         free_page(child_kpage);
         return -1;
     }
-    memcpy((void *)child_user_stack_page, (void *)parent_user_stack_page, PAGE_SIZE);
+    memcpy((void *)child_user_stack_page, (void *)parent_user_stack_page, 8 * PAGE_SIZE);
 
     child->user_stack_page = child_user_stack_page;
-
     int64_t stack_offset = child_user_stack_page - parent_user_stack_page;
 
     uint64_t kstack_top = child_kpage + PAGE_SIZE;

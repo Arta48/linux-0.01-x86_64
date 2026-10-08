@@ -1853,13 +1853,25 @@ void user_init_process(void)
                 cmd_buf[buf_len] = '\0';
                 history_add(cmd_buf);
 
-                char expanded[256];
-                expand_vars(cmd_buf, expanded, sizeof(expanded));
-                execute_command(expanded);
+                const char *cb = cmd_buf;
+                while (*cb == ' ' || *cb == '\t') cb++;
 
-                buf_len = 0;
-                check_bg_jobs();
-                print_prompt();
+                /* Если это блок цикла/условия или цепочка со знаком ';',
+                 *                   передаем строку нераскрытой для динамической подстановки на каждой итерации */
+                if (u_strncmp(cb, "for ", 4) == 0 ||
+                    u_strncmp(cb, "while ", 6) == 0 ||
+                    u_strncmp(cb, "if ", 3) == 0 ||
+                    u_strstr(cb, ";") != NULL) {
+                    execute_command(cb);
+                    } else {
+                        char expanded[256];
+                        expand_vars(cb, expanded, sizeof(expanded));
+                        execute_command(expanded);
+                    }
+
+                    buf_len = 0;
+                    check_bg_jobs();
+                    print_prompt();
             } else if (c >= 32 && c <= 126) {
                 if (buf_len < (int)sizeof(cmd_buf) - 1) {
                     cmd_buf[buf_len++] = c;

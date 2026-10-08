@@ -131,50 +131,41 @@ static int64_t sys_getuid(void)
     return (int64_t)current->uid;
 }
 
-/* sys_setuid: проверяет пароль в /etc/passwd перед сменой пользователя */
 static int64_t sys_setuid(uint16_t uid, const char *password)
 {
-    /* Суперпользователь root (euid == 0) может переключаться без пароля */
     if (current->euid == 0) {
         current->uid = uid;
         current->euid = uid;
         return 0;
     }
 
-    /* Обычный пользователь переключается сам на себя */
     if (uid == current->uid) {
         return 0;
     }
 
-    /* Если передан пароль, проверяем его в /etc/passwd */
     if (!password) {
-        return -1; /* Permission denied */
+        return -1;
     }
 
     uint64_t fsz = 0;
     const char *data = fs_get_file_data("/etc/passwd", &fsz);
     if (!data || fsz == 0) return -1;
 
-    /* Парсим записи формата: user:pass:uid:... */
     const char *p = data;
     while (*p && (uint64_t)(p - data) < fsz) {
         const char *line_start = p;
         while (*p && *p != '\n') p++;
 
-        /* Ищем первое двоеточие (после имени) */
         const char *c1 = line_start;
         while (c1 < p && *c1 != ':') c1++;
 
-        /* Ищем второе двоеточие (после пароля) */
         const char *c2 = c1 + 1;
         while (c2 < p && *c2 != ':') c2++;
 
-        /* Ищем третье двоеточие (после UID) */
         const char *c3 = c2 + 1;
         while (c3 < p && *c3 != ':') c3++;
 
         if (c1 < p && c2 < p && c3 < p) {
-            /* Считываем UID */
             uint16_t entry_uid = 0;
             const char *uptr = c2 + 1;
             while (uptr < c3) {
@@ -185,12 +176,11 @@ static int64_t sys_setuid(uint16_t uid, const char *password)
             }
 
             if (entry_uid == uid) {
-                /* Сверяем пароль */
                 uint64_t pass_len = c2 - (c1 + 1);
                 if (strlen(password) == pass_len && memcmp(password, c1 + 1, pass_len) == 0) {
                     current->uid = uid;
                     current->euid = uid;
-                    return 0; /* Аутентификация успешна! */
+                    return 0;
                 }
             }
         }
@@ -198,7 +188,7 @@ static int64_t sys_setuid(uint16_t uid, const char *password)
         if (*p == '\n') p++;
     }
 
-    return -1; /* Неверный пароль */
+    return -1;
 }
 
 static int64_t sys_time(void)
@@ -235,7 +225,7 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
                     }
 
                     if (task[i]->user_stack_page) {
-                        free_page(task[i]->user_stack_page);
+                        free_pages(task[i]->user_stack_page, 8);
                     }
                     free_page((uint64_t)task[i]);
                     task[i] = NULL;
@@ -339,7 +329,7 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         return -1;
     }
 
-    /* 1. БЕЗОПАСНО копируем argv в буфер ядра ДО освобождения стека */
+    /* 1. БЕЗОПАСНО копируем аргументы argv в буфер ядра ДО модификации стека */
     int argc = 0;
     char k_argv_buf[16][64];
     while (argv && argv[argc] && argc < 15) {
@@ -357,22 +347,28 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         argc = 1;
     }
 
-    /* 2. Загружаем бинарник по адресу 0x60000000 */
-    uint64_t text_phys = get_free_page();
-    if (!text_phys) return -1;
-    map_page(NULL, USER_TEXT_BASE, text_phys, PTE_WRITABLE | PTE_USER);
+    /* 2. Загружаем бинарник по адресу 0x60000000 (проецируем ВСЕ страницы файла!) */
+    uint64_t text_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint64_t p = 0; p < text_pages; p++) {
+        uint64_t text_phys = get_free_page();
+        if (!text_phys) return -1;
+        map_page(NULL, USER_TEXT_BASE + (p * PAGE_SIZE), text_phys, PTE_WRITABLE | PTE_USER);
+    }
     memcpy((void *)USER_TEXT_BASE, data, file_size);
+    uint64_t total_mapped = text_pages * PAGE_SIZE;
+    if (total_mapped > file_size) {
+        memset((void *)(USER_TEXT_BASE + file_size), 0, total_mapped - file_size);
+    }
 
-    /* 3. Выделяем щедрый стек пользователя на 16 КБ (4 страницы) */
-    uint64_t new_stack = get_free_page();
+    /* 3. Выделяем непрерывный стек пользователя на 32 КБ (8 страниц) */
+    uint64_t new_stack = get_free_pages(8);
     if (!new_stack) return -1;
-    get_free_page(); get_free_page(); get_free_page();
 
     if (current->user_stack_page) {
-        free_page(current->user_stack_page);
+        free_pages(current->user_stack_page, 8);
     }
     current->user_stack_page = new_stack;
-    uint64_t user_rsp = new_stack + 16384 - 16;
+    uint64_t user_rsp = new_stack + (8 * PAGE_SIZE) - 16;
 
     /* 4. Раскладываем строки аргументов на стеке */
     uint64_t u_argv_ptrs[18];
@@ -507,7 +503,6 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             ret = sys_getuid();
             break;
         case __NR_setuid:
-            /* arg1 = uid, arg2 = password */
             ret = sys_setuid((uint16_t)arg1, (const char *)arg2);
             break;
         case __NR_time:
