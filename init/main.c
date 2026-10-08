@@ -9,6 +9,7 @@
 #include <linux/time.h>
 #include <linux/utsname.h>
 #include <linux/string.h>
+#include <linux/stat.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -59,6 +60,11 @@ static inline int64_t u_unlink(const char *path)
 static inline int64_t u_chmod(const char *path, int mode)
 {
     return u_syscall(__NR_chmod, (uint64_t)path, mode, 0);
+}
+
+static inline int64_t u_stat(const char *path, struct stat *buf)
+{
+    return u_syscall(__NR_stat, (uint64_t)path, (uint64_t)buf, 0);
 }
 
 static inline int64_t u_chdir(const char *path)
@@ -195,6 +201,25 @@ static void u_print_num(uint64_t n)
         buf[i++] = digits[n % 10];
         n /= 10;
     }
+    while (--i >= 0) {
+        u_write(1, &buf[i], 1);
+    }
+}
+
+static void u_print_octal(uint32_t n)
+{
+    char buf[16];
+    char digits[] = "01234567";
+    int i = 0;
+    if (n == 0) {
+        u_print("0");
+        return;
+    }
+    while (n > 0) {
+        buf[i++] = digits[n % 8];
+        n /= 8;
+    }
+    u_print("0");
     while (--i >= 0) {
         u_write(1, &buf[i], 1);
     }
@@ -426,6 +451,7 @@ static int is_var_char(char c)
     (c == '_');
 }
 
+/* ИСПРАВЛЕНИЕ: точная обработка $? и $# */
 static void expand_vars(const char *in, char *out, uint64_t max_len)
 {
     uint64_t oi = 0;
@@ -433,11 +459,24 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
         if (*in == '$') {
             in++;
 
+            /* $? - код возврата последней команды */
             if (*in == '?') {
                 char nb[16]; int ni = 0; int v = last_exit_code;
                 if (v == 0) nb[ni++] = '0';
                 while (v > 0) { nb[ni++] = '0' + (v % 10); v /= 10; }
                 while (--ni >= 0 && oi < max_len - 1) out[oi++] = nb[ni];
+                in++;
+                continue;
+            }
+
+            /* $# - количество переданных аргументов */
+            if (*in == '#') {
+                const char *val = env_get("#");
+                if (val) {
+                    while (*val && oi < max_len - 1) out[oi++] = *val++;
+                } else {
+                    out[oi++] = '0';
+                }
                 in++;
                 continue;
             }
@@ -507,10 +546,8 @@ static void user_sigint_handler(int sig)
     sigint_received = 1;
 }
 
-/* ИНТЕРАКТИВНЫЙ ТЕКСТОВЫЙ РЕДАКТОР (RING 3) */
 #define MAX_ED_LINES 64
 #define MAX_ED_LEN   128
-
 static char ed_lines[MAX_ED_LINES][MAX_ED_LEN];
 static int ed_line_count = 0;
 
@@ -524,7 +561,6 @@ static void run_editor(const char *filename)
 
     ed_line_count = 0;
 
-    /* Считываем существующий файл, если он есть */
     int64_t fd = u_open(fname, O_RDONLY);
     if (fd >= 0) {
         char c;
@@ -774,7 +810,6 @@ static void read_password(char *out, int max_len)
     u_print("\n");
 }
 
-/* ИСПОЛНЕНИЕ СКРИПТОВ С ПОДДЕРЖКОЙ АРГУМЕНТОВ $1, $2, $# */
 static void execute_script_args(const char *cmd_line)
 {
     char fname[64];
@@ -785,7 +820,6 @@ static void execute_script_args(const char *cmd_line)
     fname[fi] = '\0';
     strip_quotes(fname);
 
-    /* Считываем аргументы скрипта: $1, $2... */
     int argc = 0;
     char arg_keys[9][4] = { "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 
@@ -853,7 +887,6 @@ static void execute_script_args(const char *cmd_line)
 
     u_close((int)fd);
 
-    /* Очищаем аргументы */
     for (int k = 0; k < argc; k++) {
         env_unset(arg_keys[k]);
     }
@@ -912,7 +945,8 @@ static void execute_command(const char *cmd)
     if (u_strcmp(exec_cmd, "help") == 0) {
         u_print("Linux 0.01 (x86_64) Shell built-in commands:\n");
         u_print("  help            - show this help message\n");
-        u_print("  edit <file>     - interactive text/script editor\n");
+        u_print("  stat <file>     - display file inode metadata\n");
+        u_print("  edit <file>     - interactive text editor\n");
         u_print("  sh <f> [args..] - execute script with $1, $2, $# parameters\n");
         u_print("  whoami / id     - print current user / group info\n");
         u_print("  su [user]       - switch user (password check)\n");
@@ -935,6 +969,48 @@ static void execute_command(const char *cmd)
         u_print("  uname [-a]      - print system information\n");
         u_print("  clear / exit    - terminal control\n");
         last_exit_code = 0;
+    } else if (u_strncmp(exec_cmd, "stat ", 5) == 0) {
+        const char *p = exec_cmd + 5;
+        while (*p == ' ') p++;
+        char fname[MAX_FILENAME];
+        int fi = 0;
+        while (*p && fi < MAX_FILENAME - 1) fname[fi++] = *p++;
+        fname[fi] = '\0';
+        strip_quotes(fname);
+
+        struct stat st;
+        if (u_stat(fname, &st) != 0) {
+            u_print("stat: cannot stat: "); u_print(fname); u_print("\n");
+            last_exit_code = 1;
+        } else {
+            u_print("  File: "); u_print(fname); u_print("\n");
+            u_print("  Size: "); u_print_num(st.st_size);
+            u_print("\t Blocks: 1\t IO Block: 4096   ");
+            if (S_ISDIR(st.st_mode)) u_print("directory\n");
+            else u_print("regular file\n");
+
+            u_print("Device: 1\t Inode: "); u_print_num(st.st_ino);
+            u_print("\t Links: "); u_print_num(st.st_nlink); u_print("\n");
+
+            u_print("Access: ("); u_print_octal(st.st_mode & 07777); u_print("/-");
+            if (S_ISDIR(st.st_mode)) u_print("d");
+            u_print((st.st_mode & 0400) ? "r" : "-");
+            u_print((st.st_mode & 0200) ? "w" : "-");
+            u_print((st.st_mode & 0100) ? "x" : "-");
+            u_print((st.st_mode & 0040) ? "r" : "-");
+            u_print((st.st_mode & 0020) ? "w" : "-");
+            u_print((st.st_mode & 0010) ? "x" : "-");
+            u_print((st.st_mode & 0004) ? "r" : "-");
+            u_print((st.st_mode & 0002) ? "w" : "-");
+            u_print((st.st_mode & 0001) ? "x" : "-");
+            u_print(")  Uid: ("); u_print_num(st.st_uid);
+            u_print(st.st_uid == 0 ? "/root)   Gid: (" : "/user)   Gid: (");
+            u_print_num(st.st_gid); u_print(st.st_gid == 0 ? "/root)\n" : "/user)\n");
+
+            u_print("Modify: ");
+            print_date(st.st_mtime);
+            last_exit_code = 0;
+        }
     } else if (u_strncmp(exec_cmd, "edit ", 5) == 0) {
         const char *fname = exec_cmd + 5;
         while (*fname == ' ') fname++;

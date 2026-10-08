@@ -515,6 +515,30 @@ int64_t sys_chmod(const char *filename, int mode)
     return -1;
 }
 
+int64_t sys_stat(const char *filename, struct stat *statbuf)
+{
+    if (!statbuf) return -1;
+
+    char full[MAX_FILENAME];
+    resolve_path(filename, full);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
+            statbuf->st_dev   = 1;
+            statbuf->st_ino   = (uint64_t)(i + 1);
+            statbuf->st_mode  = (ram_files[i].base.is_dir ? S_IFDIR : S_IFREG) | ram_files[i].base.mode;
+            statbuf->st_nlink = ram_files[i].base.is_dir ? 2 : 1;
+            statbuf->st_uid   = ram_files[i].base.uid;
+            statbuf->st_gid   = ram_files[i].base.gid;
+            statbuf->st_size  = ram_files[i].base.size;
+            statbuf->st_mtime = ram_files[i].base.mtime;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 int64_t sys_chdir(const char *path)
 {
     char full[MAX_FILENAME];

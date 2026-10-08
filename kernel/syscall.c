@@ -440,6 +440,8 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_dup2:
             ret = sys_dup2((int)arg1, (int)arg2);
             break;
+        case __NR_stat:
+            return sys_stat((const char *)arg1, (struct stat *)arg2);
         case __NR_chdir:
             ret = sys_chdir((const char *)arg1);
             break;

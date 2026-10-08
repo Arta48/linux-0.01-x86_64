@@ -2,6 +2,7 @@
 #define _LINUX_FS_H
 
 #include <linux/types.h>
+#include <linux/stat.h>
 
 #define NR_OPEN       16
 #define MAX_FILENAME  48
@@ -67,6 +68,7 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count);
 int64_t sys_file_write(int fd, const char *buf, uint64_t count);
 int64_t sys_unlink(const char *filename);
 int64_t sys_chmod(const char *filename, int mode);
+int64_t sys_stat(const char *filename, struct stat *statbuf);
 int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long);
 
 int64_t sys_chdir(const char *path);

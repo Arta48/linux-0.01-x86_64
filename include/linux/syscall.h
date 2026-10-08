@@ -16,6 +16,7 @@
 #define __NR_chdir   12
 #define __NR_time    13
 #define __NR_chmod   15
+#define __NR_stat    18
 #define __NR_getpid  20
 #define __NR_ps      21
 #define __NR_list    22
