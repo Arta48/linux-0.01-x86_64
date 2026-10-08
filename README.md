@@ -33,7 +33,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 
 ---
 
-## 🗺️ Реализованные этапы (Stages 1 – 39)
+## 🗺️ Реализованные этапы (Stages 1 – 40)
 
 * **Stage 1:** Multiboot-загрузка, 4-уровневый пейджинг (PML4, PDPT, PD 2MB Huge Pages), переход в Long Mode, видеовывод VGA `0xB8000` и COM1 `0x3F8`.
 * **Stage 2:** 64-битная IDT (16-байтовые шлюзы), перепрограммирование PIC 8259 на векторы 32..47, таймер PIT (100 Гц), счётчик `jiffies`.
@@ -73,7 +73,8 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 * **Stage 36:** Симметричная многоядерность (SMP / Symmetric Multiprocessing): инициализация Local APIC (MSR 0x1B, `0xFEE00000`), межпроцессорные прерывания INIT-SIPI-SIPI, 16-битный трамплин по адресу `0x8000`, переход ядер AP из 16-бит Real Mode в 64-бит Long Mode, параллельная работа CPU, динамический `/proc/cpuinfo`, утилита `smpinfo`.
 * **Stage 37:** Потоки ядра (Kernel Threads), спинлоки (`spinlock`) и мьютексы (`mutex`): аппаратные атомарные блокировки `spinlock_t` (`xchg`, `pause`), спящие мьютексы `mutex_t`, подсистема `kthread_create`, фоновый поток ядра `kworker`, защита аллокатора памяти `mem_lock`, утилита `threadtest`.
 * **Stage 38:** Сетевой драйвер Intel 82540EM (e1000) и канальный уровень (Ethernet): опрос шины PCI (порты `0xCF8`/`0xCFC`), отображение MMIO (`BAR0`), инициализация дескрипторных колец RX/TX, чтение MAC-адреса, отправка сырых кадров Ethernet, тестовая утилита `nettest`.
-* **Stage 39:** Сетевой стек: протоколы ARP, IPv4, ICMP (Ping) и сокеты UDP: сетевой адрес ядра `10.0.2.15`, шлюз `10.0.2.2`, обработка входящих Echo Request/Reply, контрольные суммы RFC 1071, фоновый опрос пакетов, утилита `ping`.
+* **Stage 39:** Сетевой стек: протоколы ARP (RFC 826), IPv4 (10.0.2.15), ICMP (Ping, RFC 792), UDP, расчет контрольных сумм RFC 1071, фоновый опрос пакетов, утилита `ping`.
+* **Stage 40:** Протокол TCP (RFC 793), сокетный интерфейс BSD (socket, bind, listen, accept) и пользовательский HTTP веб-сервер в Ring 3 (`/bin/httpd`). Проброс портов QEMU (`hostfwd=tcp::8080-:80`) для просмотра веб-страницы ядра прямо в браузере на хосте Arch Linux.
 
 ---
 

@@ -23,9 +23,15 @@
 #define __NR_kill    37
 #define __NR_mkdir   39
 #define __NR_rmdir   40
+#define __NR_socket  41
 #define __NR_pipe    42
+#define __NR_accept  43
+#define __NR_sendto  44
 #define __NR_brk     45
 #define __NR_signal  48
+#define __NR_bind    49
+#define __NR_listen  50
+#define __NR_recvfrom 51
 #define __NR_uname   59
 #define __NR_dup2    63
 #define __NR_getcwd  79
@@ -100,6 +106,10 @@ int kill(int pid, int sig) { return (int)syscall2(__NR_kill, pid, sig); }
 int signal(int sig, void (*handler)(int)) { return (int)syscall2(__NR_signal, sig, (uint64_t)handler); }
 int uname(struct utsname *name) { return (int)syscall1(__NR_uname, (uint64_t)name); }
 int sync(void) { return (int)syscall0(__NR_sync); }
+int socket(int domain, int type, int protocol) { return (int)syscall3(__NR_socket, domain, type, protocol); }
+int bind(int sockfd, uint16_t port) { return (int)syscall2(__NR_bind, sockfd, port); }
+int listen(int sockfd, int backlog) { return (int)syscall2(__NR_listen, sockfd, backlog); }
+int accept(int sockfd) { return (int)syscall1(__NR_accept, sockfd); }
 int64_t list(const char *path, char *buf, size_t max_len, int is_long) { return syscall4(__NR_list, (uint64_t)path, (uint64_t)buf, max_len, is_long); }
 void ps(void) { syscall0(__NR_ps); }
 void pause(void) { syscall0(__NR_pause); }

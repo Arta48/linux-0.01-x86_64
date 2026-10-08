@@ -8,6 +8,7 @@
 #include <linux/string.h>
 #include <linux/utsname.h>
 #include <linux/time.h>
+#include <linux/tcp.h>
 
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
@@ -480,6 +481,62 @@ int64_t sys_exit(int status)
     return 0;
 }
 
+static int64_t sys_socket(int domain, int type, int protocol)
+{
+    (void)domain; (void)type; (void)protocol;
+    int sock_id = tcp_socket_create();
+    if (sock_id < 0) return -1;
+
+    for (int fd = 3; fd < NR_OPEN; fd++) {
+        if (!current->filp[fd].in_use) {
+            current->filp[fd].type = FILE_TYPE_SOCKET;
+            current->filp[fd].sock_id = sock_id;
+            current->filp[fd].in_use = 1;
+            current->filp[fd].mode = 3; /* Read/Write */
+            return fd;
+        }
+    }
+    tcp_socket_close(sock_id);
+    return -1;
+}
+
+static int64_t sys_bind(int fd, uint16_t port)
+{
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
+    if (current->filp[fd].type != FILE_TYPE_SOCKET) return -1;
+    return tcp_socket_bind(current->filp[fd].sock_id, port);
+}
+
+static int64_t sys_listen(int fd, int backlog)
+{
+    (void)backlog;
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
+    if (current->filp[fd].type != FILE_TYPE_SOCKET) return -1;
+    return tcp_socket_listen(current->filp[fd].sock_id);
+}
+
+static int64_t sys_accept(int fd)
+{
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
+    if (current->filp[fd].type != FILE_TYPE_SOCKET) return -1;
+
+    int client_sock = tcp_socket_accept(current->filp[fd].sock_id);
+    if (client_sock < 0) return -1;
+
+    /* Ищем свободный дескриптор, исключая дескриптор самого сервера */
+    for (int nfd = fd + 1; nfd < NR_OPEN; nfd++) {
+        if (!current->filp[nfd].in_use) {
+            current->filp[nfd].type = FILE_TYPE_SOCKET;
+            current->filp[nfd].sock_id = client_sock;
+            current->filp[nfd].in_use = 1;
+            current->filp[nfd].mode = 3;
+            return nfd;
+        }
+    }
+    tcp_socket_close(client_sock);
+    return -1;
+}
+
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, struct trap_frame *tf)
 {
     int64_t ret = -1;
@@ -573,6 +630,18 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             break;
         case __NR_exit:
             ret = sys_exit((int)arg1);
+            break;
+        case __NR_socket:
+            ret = sys_socket((int)arg1, (int)arg2, (int)arg3);
+            break;
+        case __NR_bind:
+            ret = sys_bind((int)arg1, (uint16_t)arg2);
+            break;
+        case __NR_listen:
+            ret = sys_listen((int)arg1, (int)arg2);
+            break;
+        case __NR_accept:
+            ret = sys_accept((int)arg1);
             break;
         default:
             printk("[SYSCALL] Unknown syscall: %d\n", nr);

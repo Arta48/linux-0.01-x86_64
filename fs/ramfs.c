@@ -7,6 +7,7 @@
 #include <linux/time.h>
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
+#include <linux/tcp.h>
 
 struct proc_ram_file {
     struct ram_file base;
@@ -587,6 +588,10 @@ int64_t sys_close(int fd)
         }
     }
 
+    if (f->type == FILE_TYPE_SOCKET) {
+        tcp_socket_close(f->sock_id);
+    }
+
     f->in_use = 0;
     f->type = 0;
     f->mode = 0;
@@ -610,6 +615,10 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
 
     if (f->type == FILE_TYPE_MINIX) {
         return minix_file_read(f->minix_ino, &f->pos, buf, count);
+    }
+
+    if (f->type == FILE_TYPE_SOCKET) {
+        return tcp_socket_read(f->sock_id, buf, count);
     }
 
     struct ram_file *rf = f->rf;
@@ -674,6 +683,10 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
 
     if (f->type == FILE_TYPE_MINIX) {
         return minix_file_write(f->minix_ino, &f->pos, buf, count);
+    }
+
+    if (f->type == FILE_TYPE_SOCKET) {
+        return tcp_socket_write(f->sock_id, buf, count);
     }
 
     struct ram_file *rf = f->rf;

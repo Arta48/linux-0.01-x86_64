@@ -13,6 +13,7 @@
 #define FILE_TYPE_PIPE    2
 #define FILE_TYPE_BLOCK   3
 #define FILE_TYPE_MINIX   4
+#define FILE_TYPE_SOCKET  5
 
 #define O_RDONLY  00
 #define O_WRONLY  01
@@ -62,7 +63,8 @@ struct file {
     uint64_t pos;
     struct ram_file *rf;
     struct pipe *pipe;
-    uint32_t minix_ino;        /* Номер инода на Minix v1 FS */
+    uint32_t minix_ino;
+    int sock_id;           /* Индекс сокета TCP для FILE_TYPE_SOCKET */
     int in_use;
 };
 

@@ -978,6 +978,7 @@ static void execute_command(const char *cmd)
             printf("  ps / kill / wait- process management\n");
             printf("  uname [-a]      - print system information\n");
             printf("  clear / exit    - terminal control\n");
+            printf("  httpd           - run Ring 3 user space HTTP web server (port 80)\n");
             last_exit_code = 0;
         } else if (strcmp(exec_cmd, "sync") == 0) {
             sync();

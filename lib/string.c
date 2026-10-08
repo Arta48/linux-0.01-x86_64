@@ -82,3 +82,17 @@ char *strncpy(char *dest, const char *src, uint64_t n)
     while (n--) *d++ = '\0';
     return dest;
 }
+
+void *memmove(void *dest, const void *src, uint64_t n)
+{
+    char *d = (char *)dest;
+    const char *s = (const char *)src;
+    if (d < s) {
+        while (n--) *d++ = *s++;
+    } else if (d > s) {
+        d += n;
+        s += n;
+        while (n--) *--d = *--s;
+    }
+    return dest;
+}

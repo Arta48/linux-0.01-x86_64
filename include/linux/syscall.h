@@ -27,9 +27,15 @@
 #define __NR_kill    37
 #define __NR_mkdir   39
 #define __NR_rmdir   40
+#define __NR_socket  41
 #define __NR_pipe    42
+#define __NR_accept  43
+#define __NR_sendto  44
 #define __NR_brk     45
 #define __NR_signal  48
+#define __NR_bind    49
+#define __NR_listen  50
+#define __NR_recvfrom 51
 #define __NR_uname   59
 #define __NR_dup2    63
 #define __NR_getcwd  79

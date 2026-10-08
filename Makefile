@@ -18,7 +18,8 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
                 rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest \
-                rootfs/bin/smpinfo rootfs/bin/threadtest rootfs/bin/nettest rootfs/bin/ping
+                rootfs/bin/smpinfo rootfs/bin/threadtest rootfs/bin/nettest rootfs/bin/ping \
+                rootfs/bin/httpd
 
 all: Image rootfs.tar disk.img
 
@@ -196,6 +197,13 @@ rootfs/bin/ping: user/crt0.o user/ping.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/ping.o user/ulibc.o -o rootfs/bin/ping
 
+user/httpd.o: user/httpd.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/httpd.c -o user/httpd.o
+
+rootfs/bin/httpd: user/crt0.o user/httpd.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/httpd.o user/ulibc.o -o rootfs/bin/httpd
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
@@ -211,7 +219,10 @@ rootfs.tar: $(USER_BINARIES)
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
 run: Image rootfs.tar disk.img
-	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -netdev user,id=net0 -device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
+	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar \
+	-drive file=disk.img,format=raw,index=0,media=disk \
+	-netdev user,id=net0,hostfwd=tcp::8080-:80 \
+	-device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
 
 run-tap: Image rootfs.tar disk.img
 	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar \
