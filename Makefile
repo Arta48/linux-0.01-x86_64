@@ -13,11 +13,12 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o kernel/hd.o kernel/smp.o kernel/trampoline.o \
-       kernel/kthread.o fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
+       kernel/kthread.o kernel/pci.o kernel/e1000.o kernel/net.o \
+       fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
                 rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest \
-                rootfs/bin/smpinfo rootfs/bin/threadtest
+                rootfs/bin/smpinfo rootfs/bin/threadtest rootfs/bin/nettest
 
 all: Image rootfs.tar disk.img
 
@@ -169,6 +170,22 @@ rootfs/bin/threadtest: user/crt0.o user/threadtest.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/threadtest.o user/ulibc.o -o rootfs/bin/threadtest
 
+kernel/pci.o: kernel/pci.c
+	$(CC) $(CFLAGS) -c kernel/pci.c -o kernel/pci.o
+
+kernel/e1000.o: kernel/e1000.c
+	$(CC) $(CFLAGS) -c kernel/e1000.c -o kernel/e1000.o
+
+kernel/net.o: kernel/net.c
+	$(CC) $(CFLAGS) -c kernel/net.c -o kernel/net.o
+
+user/nettest.o: user/nettest.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/nettest.c -o user/nettest.o
+
+rootfs/bin/nettest: user/crt0.o user/nettest.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/nettest.o user/ulibc.o -o rootfs/bin/nettest
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
@@ -184,7 +201,7 @@ rootfs.tar: $(USER_BINARIES)
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
 run: Image rootfs.tar disk.img
-	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -serial mon:stdio
+	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -netdev user,id=net0 -device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
 
 clean:
 	rm -rf $(OBJS) Image rootfs.tar rootfs user/*.o

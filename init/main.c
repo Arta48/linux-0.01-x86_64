@@ -12,17 +12,16 @@
 #include <linux/kthread.h>
 #include <linux/smp.h>
 #include <linux/string.h>
+#include <linux/net.h>
 
 /* Фоновый поток ядра */
 static int kthread_heartbeat(void *arg)
 {
     (void)arg;
-    for (int i = 0; i < 3; i++) {
-        for (volatile uint64_t k = 0; k < 150000000ULL; k++) {
+    for (;;) {
+        for (volatile uint64_t k = 0; k < 200000000ULL; k++) {
             __asm__ volatile ("pause");
         }
-        printk("[KTHREAD] Background kernel worker heartbeat #%d (CPU %d)\n",
-               i + 1, (int)smp_get_cpu_id());
     }
     return 0;
 }
@@ -96,6 +95,7 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     fs_init();
     minix_init();
     smp_init();
+    net_init();
     strcpy(current->name, "idle");
 
     /* Запуск фонового потока ядра */

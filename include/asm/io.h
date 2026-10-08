@@ -47,4 +47,16 @@ static inline void outsw(unsigned short port, const void *addr, unsigned long co
     );
 }
 
+static inline void outl(unsigned int value, unsigned short port)
+{
+    __asm__ volatile ("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline unsigned int inl(unsigned short port)
+{
+    unsigned int value;
+    __asm__ volatile ("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 #endif
