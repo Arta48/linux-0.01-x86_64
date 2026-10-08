@@ -23,6 +23,40 @@ typedef int64_t            intptr_t;
 #define O_TRUNC   01000
 #define O_APPEND  02000
 
+#define S_IFMT   00170000
+#define S_IFREG  0100000
+#define S_IFDIR  0040000
+#define S_IFBLK  0060000
+
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#define S_ISBLK(m) (((m) & S_IFMT) == S_IFBLK)
+
+struct stat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_size;
+    uint64_t st_mtime;
+};
+
+struct utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+};
+
+#define SIGINT   2
+#define SIGKILL  9
+#define SIGTERM  15
+
+#define WNOHANG  1
+
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
 #define va_end(v)      __builtin_va_end(v)
@@ -40,8 +74,25 @@ int     execve(const char *path, char **argv, char **envp);
 int     waitpid(int pid, int *status, int options);
 int     getpid(void);
 int     getuid(void);
+int     setuid(uint16_t uid, const char *password);
 int64_t time(void);
 void   *sbrk(intptr_t increment);
+
+int     stat(const char *path, struct stat *buf);
+int     chdir(const char *path);
+int     mkdir(const char *path);
+int     rmdir(const char *path);
+int     getcwd(char *buf, size_t size);
+int     pipe(int *pipefd);
+int     dup2(int oldfd, int newfd);
+int     unlink(const char *path);
+int     chmod(const char *path, int mode);
+int     kill(int pid, int sig);
+int     signal(int sig, void (*handler)(int));
+int     uname(struct utsname *name);
+int64_t list(const char *path, char *buf, size_t max_len, int is_long);
+void    ps(void);
+void    pause(void);
 
 /* Строковые и служебные функции */
 size_t  strlen(const char *s);
@@ -50,6 +101,7 @@ int     strncmp(const char *s1, const char *s2, size_t n);
 char   *strcpy(char *dest, const char *src);
 char   *strncpy(char *dest, const char *src, size_t n);
 char   *strcat(char *dest, const char *src);
+const char *strstr(const char *haystack, const char *needle);
 void   *memcpy(void *dest, const void *src, size_t n);
 void   *memset(void *s, int c, size_t n);
 int64_t atoi(const char *s);

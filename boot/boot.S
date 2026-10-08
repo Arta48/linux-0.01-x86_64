@@ -21,10 +21,13 @@ mb_info_val:
 
 .section .bss
 .align 4096
+.globl pml4_table
 pml4_table:
     .skip 4096
+.globl pdpt_table
 pdpt_table:
     .skip 4096
+.globl pd_table
 pd_table:
     .skip 4096
 stack_bottom:

@@ -21,6 +21,10 @@ void free_pages(uint64_t addr, uint32_t count);
 int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 void unmap_page(uint64_t *pml4, uint64_t virt);
 
+uint64_t create_process_pml4(void);
+uint64_t copy_process_pml4(uint64_t parent_pml4);
+void free_process_pml4(uint64_t pml4_phys);
+
 uint32_t get_free_pages_count(void);
 uint32_t get_total_pages_count(void);
 

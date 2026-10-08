@@ -3,6 +3,7 @@
 #include <linux/string.h>
 
 extern char _end[];
+extern char pd_table[];
 
 static uint64_t low_mem = 0;
 static uint32_t paging_pages = 0;
@@ -93,13 +94,11 @@ uint64_t get_free_pages(uint32_t count)
 void free_page(uint64_t addr)
 {
     if (addr < low_mem || addr >= HIGH_MEMORY) {
-        printk("[PANIC] Trying to free non-allocated page: %p\n", addr);
         return;
     }
 
     uint32_t index = (addr - low_mem) / PAGE_SIZE;
     if (mem_map[index] == 0) {
-        printk("[PANIC] Double free of page: %p\n", addr);
         return;
     }
 
@@ -128,6 +127,8 @@ int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags)
         uint64_t new_pdpt = get_free_page();
         if (!new_pdpt) return -1;
         pml4[pml4_idx] = new_pdpt | PTE_PRESENT | PTE_WRITABLE | (flags & PTE_USER);
+    } else {
+        pml4[pml4_idx] |= (flags & PTE_USER);
     }
     uint64_t *pdpt = (uint64_t *)(pml4[pml4_idx] & ~0xFFFULL);
 
@@ -135,6 +136,8 @@ int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags)
         uint64_t new_pd = get_free_page();
         if (!new_pd) return -1;
         pdpt[pdpt_idx] = new_pd | PTE_PRESENT | PTE_WRITABLE | (flags & PTE_USER);
+    } else {
+        pdpt[pdpt_idx] |= (flags & PTE_USER);
     }
     uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
 
@@ -142,6 +145,8 @@ int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags)
         uint64_t new_pt = get_free_page();
         if (!new_pt) return -1;
         pd[pd_idx] = new_pt | PTE_PRESENT | PTE_WRITABLE | (flags & PTE_USER);
+    } else {
+        pd[pd_idx] |= (flags & PTE_USER);
     }
     uint64_t *pt = (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
 
@@ -149,6 +154,106 @@ int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags)
 
     invlpg(virt);
     return 0;
+}
+
+uint64_t create_process_pml4(void)
+{
+    uint64_t pml4_phys = get_free_page();
+    if (!pml4_phys) return 0;
+
+    uint64_t pdpt_phys = get_free_page();
+    if (!pdpt_phys) {
+        free_page(pml4_phys);
+        return 0;
+    }
+
+    uint64_t *pml4 = (uint64_t *)pml4_phys;
+    uint64_t *pdpt = (uint64_t *)pdpt_phys;
+
+    /* PML4[0] указывает на персональную PDPT процесса */
+    pml4[0] = pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+
+    /* PDPT[0] указывает на общую таблицу ядра pd_table (0..1 ГБ identity map) */
+    pdpt[0] = (uint64_t)pd_table | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+
+    return pml4_phys;
+}
+
+uint64_t copy_process_pml4(uint64_t parent_pml4)
+{
+    uint64_t child_pml4_phys = create_process_pml4();
+    if (!child_pml4_phys) return 0;
+
+    if (!parent_pml4) {
+        return child_pml4_phys;
+    }
+
+    uint64_t *p_pml4 = (uint64_t *)parent_pml4;
+    if (!(p_pml4[0] & PTE_PRESENT)) return child_pml4_phys;
+
+    uint64_t *p_pdpt = (uint64_t *)(p_pml4[0] & ~0xFFFULL);
+
+    /* Обходим только пользовательские диапазоны (PDPT[1..511], от 1 ГБ) */
+    for (uint64_t pdpt_idx = 1; pdpt_idx < 512; pdpt_idx++) {
+        if (!(p_pdpt[pdpt_idx] & PTE_PRESENT)) continue;
+
+        uint64_t *p_pd = (uint64_t *)(p_pdpt[pdpt_idx] & ~0xFFFULL);
+        for (uint64_t pd_idx = 0; pd_idx < 512; pd_idx++) {
+            if (!(p_pd[pd_idx] & PTE_PRESENT)) continue;
+
+            uint64_t *p_pt = (uint64_t *)(p_pd[pd_idx] & ~0xFFFULL);
+            for (uint64_t pt_idx = 0; pt_idx < 512; pt_idx++) {
+                if (!(p_pt[pt_idx] & PTE_PRESENT)) continue;
+
+                uint64_t parent_phys = p_pt[pt_idx] & ~0xFFFULL;
+                uint64_t flags = p_pt[pt_idx] & 0xFFFULL;
+
+                uint64_t virt = (pdpt_idx << 30) | (pd_idx << 21) | (pt_idx << 12);
+
+                uint64_t child_phys = get_free_page();
+                if (!child_phys) {
+                    free_process_pml4(child_pml4_phys);
+                    return 0;
+                }
+
+                memcpy((void *)child_phys, (void *)parent_phys, PAGE_SIZE);
+                map_page((uint64_t *)child_pml4_phys, virt, child_phys, flags);
+            }
+        }
+    }
+
+    return child_pml4_phys;
+}
+
+void free_process_pml4(uint64_t pml4_phys)
+{
+    if (!pml4_phys) return;
+
+    uint64_t *pml4 = (uint64_t *)pml4_phys;
+    if (pml4[0] & PTE_PRESENT) {
+        uint64_t *pdpt = (uint64_t *)(pml4[0] & ~0xFFFULL);
+
+        /* pdpt[0] - это общая таблица ядра, ее НЕ освобождаем! */
+        for (uint64_t pdpt_idx = 1; pdpt_idx < 512; pdpt_idx++) {
+            if (!(pdpt[pdpt_idx] & PTE_PRESENT)) continue;
+
+            uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
+            for (uint64_t pd_idx = 0; pd_idx < 512; pd_idx++) {
+                if (!(pd[pd_idx] & PTE_PRESENT)) continue;
+
+                uint64_t *pt = (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
+                for (uint64_t pt_idx = 0; pt_idx < 512; pt_idx++) {
+                    if (!(pt[pt_idx] & PTE_PRESENT)) continue;
+                    uint64_t phys_page = pt[pt_idx] & ~0xFFFULL;
+                    free_page(phys_page);
+                }
+                free_page((uint64_t)pt);
+            }
+            free_page((uint64_t)pd);
+        }
+        free_page((uint64_t)pdpt);
+    }
+    free_page(pml4_phys);
 }
 
 uint32_t get_free_pages_count(void)

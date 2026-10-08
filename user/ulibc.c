@@ -7,11 +7,27 @@
 #define __NR_open    5
 #define __NR_close   6
 #define __NR_waitpid 7
+#define __NR_unlink  10
 #define __NR_execve  11
+#define __NR_chdir   12
 #define __NR_time    13
+#define __NR_chmod   15
+#define __NR_stat    18
 #define __NR_getpid  20
+#define __NR_ps      21
+#define __NR_list    22
+#define __NR_setuid  23
 #define __NR_getuid  24
+#define __NR_pause   29
+#define __NR_kill    37
+#define __NR_mkdir   39
+#define __NR_rmdir   40
+#define __NR_pipe    42
 #define __NR_brk     45
+#define __NR_signal  48
+#define __NR_uname   59
+#define __NR_dup2    63
+#define __NR_getcwd  79
 
 static inline int64_t syscall0(uint64_t nr)
 {
@@ -41,6 +57,14 @@ static inline int64_t syscall3(uint64_t nr, uint64_t a1, uint64_t a2, uint64_t a
     return ret;
 }
 
+static inline int64_t syscall4(uint64_t nr, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    register uint64_t r10 __asm__("r10") = a4;
+    int64_t ret;
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(nr), "D"(a1), "S"(a2), "d"(a3), "r"(r10) : "rcx", "r11", "memory");
+    return ret;
+}
+
 int open(const char *path, int flags) { return (int)syscall2(__NR_open, (uint64_t)path, flags); }
 int close(int fd) { return (int)syscall1(__NR_close, fd); }
 int64_t read(int fd, void *buf, size_t count) { return syscall3(__NR_read, fd, (uint64_t)buf, count); }
@@ -59,7 +83,24 @@ int execve(const char *path, char **argv, char **envp) {
 int waitpid(int pid, int *status, int options) { return (int)syscall3(__NR_waitpid, pid, (uint64_t)status, options); }
 int getpid(void) { return (int)syscall0(__NR_getpid); }
 int getuid(void) { return (int)syscall0(__NR_getuid); }
+int setuid(uint16_t uid, const char *password) { return (int)syscall2(__NR_setuid, uid, (uint64_t)password); }
 int64_t time(void) { return syscall0(__NR_time); }
+
+int stat(const char *path, struct stat *buf) { return (int)syscall2(__NR_stat, (uint64_t)path, (uint64_t)buf); }
+int chdir(const char *path) { return (int)syscall1(__NR_chdir, (uint64_t)path); }
+int mkdir(const char *path) { return (int)syscall1(__NR_mkdir, (uint64_t)path); }
+int rmdir(const char *path) { return (int)syscall1(__NR_rmdir, (uint64_t)path); }
+int getcwd(char *buf, size_t size) { return (int)syscall2(__NR_getcwd, (uint64_t)buf, size); }
+int pipe(int *pipefd) { return (int)syscall1(__NR_pipe, (uint64_t)pipefd); }
+int dup2(int oldfd, int newfd) { return (int)syscall2(__NR_dup2, oldfd, newfd); }
+int unlink(const char *path) { return (int)syscall1(__NR_unlink, (uint64_t)path); }
+int chmod(const char *path, int mode) { return (int)syscall2(__NR_chmod, (uint64_t)path, mode); }
+int kill(int pid, int sig) { return (int)syscall2(__NR_kill, pid, sig); }
+int signal(int sig, void (*handler)(int)) { return (int)syscall2(__NR_signal, sig, (uint64_t)handler); }
+int uname(struct utsname *name) { return (int)syscall1(__NR_uname, (uint64_t)name); }
+int64_t list(const char *path, char *buf, size_t max_len, int is_long) { return syscall4(__NR_list, (uint64_t)path, (uint64_t)buf, max_len, is_long); }
+void ps(void) { syscall0(__NR_ps); }
+void pause(void) { syscall0(__NR_pause); }
 
 static uint64_t current_brk = 0;
 
@@ -122,6 +163,19 @@ char *strcat(char *dest, const char *src)
     while (*d) d++;
     while ((*d++ = *src++));
     return dest;
+}
+
+const char *strstr(const char *haystack, const char *needle)
+{
+    if (!*needle) return haystack;
+    for (; *haystack; haystack++) {
+        if (*haystack == *needle) {
+            const char *h = haystack, *n = needle;
+            while (*h && *n && *h == *n) { h++; n++; }
+            if (!*n) return haystack;
+        }
+    }
+    return NULL;
 }
 
 void *memcpy(void *dest, const void *src, size_t n)
@@ -273,13 +327,9 @@ int vsnprintf(char *str, size_t size, const char *format, va_list ap)
             }
             case 'p': {
                 uint64_t val = (uint64_t)va_arg(ap, void *);
-                if (out + 1 < size) {
-                    str[out] = '0';
-                }
+                if (out + 1 < size) str[out] = '0';
                 out++;
-                if (out + 1 < size) {
-                    str[out] = 'x';
-                }
+                if (out + 1 < size) str[out] = 'x';
                 out++;
                 char nb[64];
                 int nlen = format_number(nb, sizeof(nb), val, 16, 0, 0, ' ');

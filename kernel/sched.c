@@ -66,7 +66,15 @@ int task_create(void (*fn)(void), long priority)
     u->task.user_stack_page = 0;
     u->task.start_brk = HEAP_START_VIRT;
     u->task.brk = HEAP_START_VIRT;
-    u->task.cr3 = 0;
+
+    /* Создаем персональное дерево каталогов страниц для задачи */
+    uint64_t task_cr3 = create_process_pml4();
+    if (!task_cr3) {
+        free_page(page);
+        return -1;
+    }
+    u->task.cr3 = task_cr3;
+
     u->task.signal = 0;
     u->task.alarm = 0;
     u->task.cwd[0] = '/';

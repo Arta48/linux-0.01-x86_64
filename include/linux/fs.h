@@ -11,6 +11,7 @@
 
 #define FILE_TYPE_REGULAR 1
 #define FILE_TYPE_PIPE    2
+#define FILE_TYPE_BLOCK   3
 
 #define O_RDONLY  00
 #define O_WRONLY  01
@@ -50,6 +51,8 @@ struct ram_file {
     int in_use;
     int is_readonly;
     int is_dir;
+    int is_dev_blk;
+    uint8_t dev_id;
 };
 
 struct file {

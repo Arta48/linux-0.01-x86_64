@@ -5,6 +5,7 @@
 #include <linux/mm.h>
 #include <linux/time.h>
 #include <linux/multiboot.h>
+#include <linux/hdreg.h>
 
 static const unsigned char bin_hello[] = {
     0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
@@ -229,6 +230,7 @@ int ramfs_create_dir(const char *path, uint16_t mode)
             ram_files[i].base.gid = 0;
             ram_files[i].base.mode = mode ? mode : 0755;
             ram_files[i].base.data = NULL;
+            ram_files[i].base.is_dev_blk = 0;
             ram_files[i].is_proc = 0;
             ram_files[i].generator = NULL;
             return 0;
@@ -276,6 +278,7 @@ int ramfs_create_file(const char *path, const char *data, uint64_t size, uint16_
         memcpy(ram_files[idx].base.name, full, len + 1);
         ram_files[idx].base.data = (char *)page;
         ram_files[idx].base.capacity = pages * PAGE_SIZE;
+        ram_files[idx].base.is_dev_blk = 0;
         ram_files[idx].is_proc = 0;
         ram_files[idx].generator = NULL;
     }
@@ -379,12 +382,13 @@ void fs_init(void)
         ram_files[i].base.mode = 0644;
         ram_files[i].base.is_readonly = 0;
         ram_files[i].base.is_dir = 0;
+        ram_files[i].base.is_dev_blk = 0;
         ram_files[i].is_proc = 0;
         ram_files[i].generator = NULL;
     }
 
-    const char *dirs[] = { "/", "/bin", "/etc", "/home", "/proc" };
-    for (int i = 0; i < 5; i++) {
+    const char *dirs[] = { "/", "/bin", "/etc", "/home", "/proc", "/dev" };
+    for (int i = 0; i < 6; i++) {
         uint64_t len = strlen(dirs[i]);
         memcpy(ram_files[i].base.name, dirs[i], len + 1);
         ram_files[i].base.is_dir = 1;
@@ -415,7 +419,8 @@ void fs_init(void)
         "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n"
         "  - Multi-user authentication: UID, GID, su, chmod\n"
         "  - Shell scripts execution (sh /etc/init.sh)\n"
-        "  - Full-screen text editor (nano)\n",
+        "  - Full-screen text editor (nano)\n"
+        "  - 64-bit IDE / ATA Hard Disk driver (/dev/hda)\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
@@ -434,7 +439,7 @@ void fs_init(void)
     uint64_t init_sizes[] = { 0, 0, 0, 0, 0, 0, sizeof(bin_hello), sizeof(bin_calc) };
 
     for (int i = 0; i < 8; i++) {
-        int idx = 5 + i;
+        int idx = 6 + i;
         uint64_t nlen = strlen(init_names[i]);
         memcpy(ram_files[idx].base.name, init_names[i], nlen + 1);
 
@@ -442,7 +447,6 @@ void fs_init(void)
         uint32_t p_count = (init_sz + PAGE_SIZE - 1) / PAGE_SIZE;
         if (p_count == 0) p_count = 1;
 
-        /* Выделяем собственные страницы памяти для каждого начального файла */
         uint64_t p_addr = get_free_pages(p_count);
         if (p_addr) {
             memcpy((void *)p_addr, init_data[i], init_sz);
@@ -455,14 +459,14 @@ void fs_init(void)
 
         ram_files[idx].base.size = init_sz;
         ram_files[idx].base.in_use = 1;
-        /* Текстовые файлы открыты для записи, бинарники - read-only */
         ram_files[idx].base.is_readonly = (i >= 6) ? 1 : 0;
         ram_files[idx].base.is_dir = 0;
+        ram_files[idx].base.is_dev_blk = 0;
         ram_files[idx].base.mtime = startup_time;
         ram_files[idx].base.mode = (i >= 6) ? 0755 : 0644;
     }
 
-    int c_idx = 13;
+    int c_idx = 14;
     memcpy(ram_files[c_idx].base.name, "/proc/cpuinfo", 14);
     ram_files[c_idx].base.data = (char *)get_free_page();
     ram_files[c_idx].base.capacity = PAGE_SIZE;
@@ -471,7 +475,7 @@ void fs_init(void)
     ram_files[c_idx].is_proc = 1;
     ram_files[c_idx].generator = generate_cpuinfo;
 
-    int m_idx = 14;
+    int m_idx = 15;
     memcpy(ram_files[m_idx].base.name, "/proc/meminfo", 14);
     ram_files[m_idx].base.data = (char *)get_free_page();
     ram_files[m_idx].base.capacity = PAGE_SIZE;
@@ -480,7 +484,21 @@ void fs_init(void)
     ram_files[m_idx].is_proc = 1;
     ram_files[m_idx].generator = generate_meminfo;
 
-    printk("[OK] Multi-user VFS Initialized\n");
+    /* Блочное устройство /dev/hda для жесткого диска */
+    int hd_idx = 16;
+    const struct hd_drive_info *hd = ide_get_drive(0);
+    memcpy(ram_files[hd_idx].base.name, "/dev/hda", 9);
+    ram_files[hd_idx].base.data = NULL;
+    ram_files[hd_idx].base.size = hd ? ((uint64_t)hd->sectors * 512) : 0;
+    ram_files[hd_idx].base.capacity = ram_files[hd_idx].base.size;
+    ram_files[hd_idx].base.in_use = 1;
+    ram_files[hd_idx].base.is_readonly = 0;
+    ram_files[hd_idx].base.is_dir = 0;
+    ram_files[hd_idx].base.is_dev_blk = 1;
+    ram_files[hd_idx].base.dev_id = 0;
+    ram_files[hd_idx].base.mode = 0660;
+
+    printk("[OK] Multi-user VFS Initialized (/dev/hda active)\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
@@ -538,6 +556,7 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].base.in_use = 1;
         ram_files[file_idx].base.is_readonly = 0;
         ram_files[file_idx].base.is_dir = 0;
+        ram_files[file_idx].base.is_dev_blk = 0;
         ram_files[file_idx].is_proc = 0;
         ram_files[file_idx].generator = NULL;
     }
@@ -547,14 +566,14 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].base.size = strlen(ram_files[file_idx].base.data);
     }
 
-    if ((flags & O_TRUNC) && !ram_files[file_idx].base.is_readonly) {
+    if ((flags & O_TRUNC) && !ram_files[file_idx].base.is_readonly && !ram_files[file_idx].base.is_dev_blk) {
         ram_files[file_idx].base.size = 0;
         ram_files[file_idx].base.mtime = get_current_time();
     }
 
     for (int fd = 3; fd < NR_OPEN; fd++) {
         if (!current->filp[fd].in_use) {
-            current->filp[fd].type = FILE_TYPE_REGULAR;
+            current->filp[fd].type = ram_files[file_idx].base.is_dev_blk ? FILE_TYPE_BLOCK : FILE_TYPE_REGULAR;
             current->filp[fd].rf   = (struct ram_file *)&ram_files[file_idx].base;
 
             if (flags & O_APPEND) {
@@ -612,9 +631,39 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
     }
 
     struct ram_file *rf = f->rf;
-    if (!rf || f->pos >= rf->size) {
-        return 0;
+    if (!rf) return -1;
+
+    /* Чтение блочного устройства (/dev/hda) через драйвер ATA */
+    if (rf->is_dev_blk) {
+        if (f->pos >= rf->size) return 0;
+        uint64_t bytes_to_read = count;
+        if (f->pos + bytes_to_read > rf->size) {
+            bytes_to_read = rf->size - f->pos;
+        }
+
+        uint64_t lba = f->pos / 512;
+        uint64_t offset = f->pos % 512;
+        uint64_t read_bytes = 0;
+        char sec_buf[512];
+
+        while (read_bytes < bytes_to_read) {
+            if (ide_read_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf) < 0) {
+                break;
+            }
+            uint64_t chunk = 512 - offset;
+            if (chunk > bytes_to_read - read_bytes) {
+                chunk = bytes_to_read - read_bytes;
+            }
+            memcpy(buf + read_bytes, sec_buf + offset, chunk);
+            read_bytes += chunk;
+            f->pos += chunk;
+            lba++;
+            offset = 0;
+        }
+        return read_bytes;
     }
+
+    if (f->pos >= rf->size) return 0;
 
     uint64_t bytes_to_read = count;
     if (f->pos + bytes_to_read > rf->size) {
@@ -650,7 +699,38 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
         return -1;
     }
 
-    /* Динамическое расширение буфера файла при нехватке памяти */
+    /* Запись в блочное устройство (/dev/hda) через драйвер ATA */
+    if (rf->is_dev_blk) {
+        uint64_t lba = f->pos / 512;
+        uint64_t offset = f->pos % 512;
+        uint64_t written_bytes = 0;
+        char sec_buf[512];
+
+        while (written_bytes < count) {
+            uint64_t chunk = 512 - offset;
+            if (chunk > count - written_bytes) {
+                chunk = count - written_bytes;
+            }
+
+            if (offset != 0 || chunk < 512) {
+                /* При невыровненной записи сначала считываем сектор */
+                ide_read_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf);
+            }
+            memcpy(sec_buf + offset, buf + written_bytes, chunk);
+
+            if (ide_write_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf) < 0) {
+                break;
+            }
+
+            written_bytes += chunk;
+            f->pos += chunk;
+            lba++;
+            offset = 0;
+        }
+        return written_bytes;
+    }
+
+    /* Динамическое расширение буфера обычного файла при нехватке памяти */
     if (f->pos + count > rf->capacity) {
         uint64_t needed_cap = f->pos + count;
         uint32_t needed_pages = (needed_cap + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -686,7 +766,7 @@ int64_t sys_unlink(const char *filename)
 
     for (int i = 0; i < MAX_FILES; i++) {
         if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
-            if (ram_files[i].base.is_readonly || ram_files[i].base.is_dir) {
+            if (ram_files[i].base.is_readonly || ram_files[i].base.is_dir || ram_files[i].base.is_dev_blk) {
                 return -1;
             }
 
@@ -736,7 +816,7 @@ int64_t sys_stat(const char *filename, struct stat *statbuf)
         if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
             statbuf->st_dev   = 1;
             statbuf->st_ino   = (uint64_t)(i + 1);
-            statbuf->st_mode  = (ram_files[i].base.is_dir ? S_IFDIR : S_IFREG) | ram_files[i].base.mode;
+            statbuf->st_mode  = (ram_files[i].base.is_dir ? S_IFDIR : (ram_files[i].base.is_dev_blk ? 0060000 : S_IFREG)) | ram_files[i].base.mode;
             statbuf->st_nlink = ram_files[i].base.is_dir ? 2 : 1;
             statbuf->st_uid   = ram_files[i].base.uid;
             statbuf->st_gid   = ram_files[i].base.gid;
@@ -847,7 +927,8 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
 
             if (is_long) {
                 const char *perms = ram_files[i].base.is_dir ? "drwxr-xr-x  " :
-                (ram_files[i].base.is_readonly ? "-rwxr-xr-x  " : "-rw-r--r--  ");
+                (ram_files[i].base.is_dev_blk ? "brw-rw----  " :
+                (ram_files[i].base.is_readonly ? "-rwxr-xr-x  " : "-rw-r--r--  "));
                 while (*perms && offset < max_len - 32) buf[offset++] = *perms++;
 
                 char szbuf[16];

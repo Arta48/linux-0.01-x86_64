@@ -227,6 +227,10 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
                     if (task[i]->user_stack_page) {
                         free_pages(task[i]->user_stack_page, 8);
                     }
+                    if (task[i]->cr3) {
+                        free_process_pml4(task[i]->cr3);
+                        task[i]->cr3 = 0;
+                    }
                     free_page((uint64_t)task[i]);
                     task[i] = NULL;
 
@@ -304,7 +308,7 @@ static int64_t sys_brk(uint64_t new_brk)
             if (!phys) {
                 return (int64_t)current->brk;
             }
-            map_page(NULL, addr, phys, PTE_WRITABLE | PTE_USER);
+            map_page((uint64_t *)current->cr3, addr, phys, PTE_WRITABLE | PTE_USER);
         }
     }
 
@@ -347,20 +351,41 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         argc = 1;
     }
 
-    /* 2. Загружаем бинарник по адресу 0x60000000 (проецируем ВСЕ страницы файла!) */
-    uint64_t text_pages = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    for (uint64_t p = 0; p < text_pages; p++) {
-        uint64_t text_phys = get_free_page();
-        if (!text_phys) return -1;
-        map_page(NULL, USER_TEXT_BASE + (p * PAGE_SIZE), text_phys, PTE_WRITABLE | PTE_USER);
-    }
-    memcpy((void *)USER_TEXT_BASE, data, file_size);
-    uint64_t total_mapped = text_pages * PAGE_SIZE;
-    if (total_mapped > file_size) {
-        memset((void *)(USER_TEXT_BASE + file_size), 0, total_mapped - file_size);
+    /* 2. Инициализируем чистое персональное дерево страниц для бинарника */
+    uint64_t old_pml4 = current->cr3;
+    uint64_t new_pml4 = create_process_pml4();
+    if (!new_pml4) return -1;
+
+    current->cr3 = new_pml4;
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
+
+    if (old_pml4) {
+        free_process_pml4(old_pml4);
     }
 
-    /* 3. Выделяем непрерывный стек пользователя на 32 КБ (8 страниц) */
+    /* 3. Загружаем бинарник по адресу 0x60000000 в новом адресном пространстве */
+    uint64_t total_mem_size = hdr->text_size;
+    if (total_mem_size < file_size) {
+        total_mem_size = file_size;
+    }
+    if (total_mem_size > 16 * 1024 * 1024) {
+        total_mem_size = 16 * 1024 * 1024;
+    }
+
+    uint64_t total_pages = (total_mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint64_t p = 0; p < total_pages; p++) {
+        uint64_t text_phys = get_free_page();
+        if (!text_phys) return -1;
+        map_page((uint64_t *)new_pml4, USER_TEXT_BASE + (p * PAGE_SIZE), text_phys, PTE_WRITABLE | PTE_USER);
+    }
+    memcpy((void *)USER_TEXT_BASE, data, file_size);
+
+    /* Инициализируем секцию .bss нулями */
+    if (total_pages * PAGE_SIZE > file_size) {
+        memset((void *)(USER_TEXT_BASE + file_size), 0, (total_pages * PAGE_SIZE) - file_size);
+    }
+
+    /* 4. Выделяем непрерывный стек пользователя на 32 КБ (8 страниц) */
     uint64_t new_stack = get_free_pages(8);
     if (!new_stack) return -1;
 
@@ -370,7 +395,7 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     current->user_stack_page = new_stack;
     uint64_t user_rsp = new_stack + (8 * PAGE_SIZE) - 16;
 
-    /* 4. Раскладываем строки аргументов на стеке */
+    /* 5. Раскладываем строки аргументов на стеке */
     uint64_t u_argv_ptrs[18];
     for (int i = 0; i < argc; i++) {
         uint64_t slen = strlen(k_argv_buf[i]) + 1;
@@ -435,6 +460,13 @@ int64_t sys_exit(int status)
     for (int i = 0; i < NR_OPEN; i++) {
         if (current->filp[i].in_use) {
             sys_close(i);
+        }
+    }
+
+    /* Перепривязываем детей к Task 1 (init) во избежание зомби-утечек */
+    for (int i = 1; i < NR_TASKS; i++) {
+        if (task[i] && task[i]->father == current->pid) {
+            task[i]->father = 1;
         }
     }
 

@@ -12,11 +12,11 @@ LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
-       kernel/syscall_entry.o kernel/time.o fs/ramfs.o fs/pipe.o lib/string.o
+       kernel/syscall_entry.o kernel/time.o kernel/hd.o fs/ramfs.o fs/pipe.o lib/string.o
 
-USER_BINARIES = rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc rootfs/bin/nano
+USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc rootfs/bin/nano rootfs/bin/hdtest
 
-all: Image rootfs.tar
+all: Image rootfs.tar disk.img
 
 boot/boot.o: boot/boot.S
 	$(CC) $(CFLAGS) -c boot/boot.S -o boot/boot.o
@@ -44,6 +44,9 @@ kernel/fork.o: kernel/fork.c
 
 kernel/time.o: kernel/time.c
 	$(CC) $(CFLAGS) -c kernel/time.c -o kernel/time.o
+
+kernel/hd.o: kernel/hd.c
+	$(CC) $(CFLAGS) -c kernel/hd.c -o kernel/hd.o
 
 fs/ramfs.o: fs/ramfs.c
 	$(CC) $(CFLAGS) -c fs/ramfs.c -o fs/ramfs.o
@@ -78,6 +81,9 @@ user/crt0.o: user/crt0.S
 user/ulibc.o: user/ulibc.c user/ulibc.h
 	$(CC) $(USER_CFLAGS) -c user/ulibc.c -o user/ulibc.o
 
+user/sh.o: user/sh.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/sh.c -o user/sh.o
+
 user/hello.o: user/hello.c user/ulibc.h
 	$(CC) $(USER_CFLAGS) -c user/hello.c -o user/hello.o
 
@@ -89,6 +95,13 @@ user/test_ulibc.o: user/test_ulibc.c user/ulibc.h
 
 user/nano.o: user/nano.c user/ulibc.h
 	$(CC) $(USER_CFLAGS) -c user/nano.c -o user/nano.o
+
+user/hdtest.o: user/hdtest.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/hdtest.c -o user/hdtest.o
+
+rootfs/bin/sh: user/crt0.o user/sh.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/sh.o user/ulibc.o -o rootfs/bin/sh
 
 rootfs/bin/hello: user/crt0.o user/hello.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
@@ -105,6 +118,15 @@ rootfs/bin/test_ulibc: user/crt0.o user/test_ulibc.o user/ulibc.o user/user.ld
 rootfs/bin/nano: user/crt0.o user/nano.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/nano.o user/ulibc.o -o rootfs/bin/nano
+
+rootfs/bin/hdtest: user/crt0.o user/hdtest.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/hdtest.o user/ulibc.o -o rootfs/bin/hdtest
+
+disk.img:
+	@if [ ! -f disk.img ]; then \
+		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
+	fi
 
 rootfs.tar: $(USER_BINARIES)
 	@mkdir -p rootfs/etc rootfs/home rootfs/scripts
@@ -147,8 +169,8 @@ rootfs.tar: $(USER_BINARIES)
 	@echo "echo === All Stage 30 control tests passed! ===" >> rootfs/scripts/test_control.sh
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
-run: Image rootfs.tar
-	qemu-system-x86_64 -m 128M -kernel Image -initrd rootfs.tar -serial mon:stdio
+run: Image rootfs.tar disk.img
+	qemu-system-x86_64 -m 128M -kernel Image -initrd rootfs.tar -drive file=disk.img,format=raw,index=0,media=disk -serial mon:stdio
 
 clean:
-	rm -rf $(OBJS) Image rootfs.tar rootfs user/*.o
+	rm -rf $(OBJS) Image rootfs.tar rootfs disk.img user/*.o

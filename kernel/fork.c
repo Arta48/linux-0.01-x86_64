@@ -51,6 +51,14 @@ int64_t sys_fork(struct trap_frame *tf)
         }
     }
 
+    /* Клонируем персональное адресное пространство страниц (CR3) ребенка */
+    uint64_t child_cr3 = copy_process_pml4(current->cr3);
+    if (!child_cr3) {
+        free_page(child_kpage);
+        return -1;
+    }
+    child->cr3 = child_cr3;
+
     /* Выделяем непрерывные 32 КБ для стека ребенка */
     uint64_t parent_user_stack_page = current->user_stack_page;
     if (!parent_user_stack_page) {
@@ -59,6 +67,7 @@ int64_t sys_fork(struct trap_frame *tf)
 
     uint64_t child_user_stack_page = get_free_pages(8);
     if (!child_user_stack_page) {
+        free_process_pml4(child_cr3);
         free_page(child_kpage);
         return -1;
     }

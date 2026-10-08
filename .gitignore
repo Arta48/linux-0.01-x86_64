@@ -6,6 +6,7 @@
 Image
 rootfs/
 rootfs.tar
+disk.img
 
 # Временные файлы редакторов
 *~
