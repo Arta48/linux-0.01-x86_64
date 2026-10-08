@@ -8,6 +8,7 @@
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
 #include <linux/tcp.h>
+#include <linux/pci.h>
 
 struct proc_ram_file {
     struct ram_file base;
@@ -104,6 +105,79 @@ static void generate_meminfo(char *buf, uint64_t max_len)
     const char *s3 = " kB\n";
     while (*s3 && o < max_len - 1) buf[o++] = *s3++;
 
+    buf[o] = '\0';
+}
+
+static void append_str(char *buf, uint64_t *o, uint64_t max, const char *s)
+{
+    while (*s && *o < max - 1) {
+        buf[(*o)++] = *s++;
+    }
+}
+
+static void append_hex(char *buf, uint64_t *o, uint64_t max, uint64_t val, int digits)
+{
+    const char hex_chars[] = "0123456789abcdef";
+    for (int i = (digits - 1) * 4; i >= 0; i -= 4) {
+        if (*o < max - 1) {
+            buf[(*o)++] = hex_chars[(val >> i) & 0xF];
+        }
+    }
+}
+
+static void append_dec(char *buf, uint64_t *o, uint64_t max, int val, int width)
+{
+    char tmp[16];
+    int ti = 0;
+    if (val == 0) tmp[ti++] = '0';
+    else {
+        int v = val;
+        while (v > 0) {
+            tmp[ti++] = '0' + (v % 10);
+            v /= 10;
+        }
+    }
+    while (ti < width && *o < max - 1) {
+        buf[(*o)++] = ' ';
+        width--;
+    }
+    while (--ti >= 0 && *o < max - 1) {
+        buf[(*o)++] = tmp[ti];
+    }
+}
+
+static void generate_pciinfo(char *buf, uint64_t max_len)
+{
+    uint64_t o = 0;
+    int total = pci_get_device_count();
+    append_str(buf, &o, max_len,
+        "BUS  SLOT FUNC VENDOR DEVICE  CLASS   MMIO_BAR0   IRQ  DESCRIPTION\n"
+        "--------------------------------------------------------------------------------\n");
+
+    for (int i = 0; i < total && o < max_len - 128; i++) {
+        const struct pci_device *d = pci_get_device(i);
+        const char *desc = pci_class_to_string(d->class_code, d->subclass, d->prog_if);
+        append_hex(buf, &o, max_len, d->bus, 2);
+        append_str(buf, &o, max_len, "   ");
+        append_hex(buf, &o, max_len, d->slot, 2);
+        append_str(buf, &o, max_len, "   ");
+        append_hex(buf, &o, max_len, d->func, 2);
+        append_str(buf, &o, max_len, "   ");
+        append_hex(buf, &o, max_len, d->vendor_id, 4);
+        append_str(buf, &o, max_len, "   ");
+        append_hex(buf, &o, max_len, d->device_id, 4);
+        append_str(buf, &o, max_len, "    ");
+        append_hex(buf, &o, max_len, d->class_code, 2);
+        append_str(buf, &o, max_len, ":");
+        append_hex(buf, &o, max_len, d->subclass, 2);
+        append_str(buf, &o, max_len, "   0x");
+        append_hex(buf, &o, max_len, d->bar0, 8);
+        append_str(buf, &o, max_len, "  ");
+        append_dec(buf, &o, max_len, d->irq, 2);
+        append_str(buf, &o, max_len, "   ");
+        append_str(buf, &o, max_len, desc);
+        append_str(buf, &o, max_len, "\n");
+    }
     buf[o] = '\0';
 }
 
@@ -436,8 +510,18 @@ void fs_init(void)
     ram_files[m_idx].is_proc = 1;
     ram_files[m_idx].generator = generate_meminfo;
 
+    /* Псевдофайл /proc/pci для опроса оборудования */
+    int p_idx = 15;
+    memcpy(ram_files[p_idx].base.name, "/proc/pci", 10);
+    ram_files[p_idx].base.data = (char *)get_free_page();
+    ram_files[p_idx].base.capacity = PAGE_SIZE;
+    ram_files[p_idx].base.in_use = 1;
+    ram_files[p_idx].base.is_readonly = 1;
+    ram_files[p_idx].is_proc = 1;
+    ram_files[p_idx].generator = generate_pciinfo;
+
     /* Блочное устройство /dev/hda для жесткого диска */
-    int hd_idx = 15;
+    int hd_idx = 16;
     const struct hd_drive_info *hd = ide_get_drive(0);
     memcpy(ram_files[hd_idx].base.name, "/dev/hda", 9);
     ram_files[hd_idx].base.data = NULL;

@@ -13,6 +13,8 @@
 #include <linux/smp.h>
 #include <linux/string.h>
 #include <linux/net.h>
+#include <linux/pci.h>
+#include <linux/xhci.h>
 
 /* Фоновый поток ядра */
 static int kthread_heartbeat(void *arg)
@@ -94,6 +96,8 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     ide_init();
     fs_init();
     minix_init();
+    pci_scan_all();
+    xhci_init();
     smp_init();
     net_init();
     strcpy(current->name, "idle");
