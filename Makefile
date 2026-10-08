@@ -11,7 +11,7 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o fs/ramfs.o fs/pipe.o lib/string.o
 
-all: Image
+all: Image rootfs.tar
 
 boot/boot.o: boot/boot.S
 	$(CC) $(CFLAGS) -c boot/boot.S -o boot/boot.o
@@ -67,8 +67,17 @@ mm/memory.o: mm/memory.c
 Image: $(OBJS)
 	$(LD) $(LDFLAGS) -o Image $(OBJS)
 
-run: Image
-	qemu-system-x86_64 -m 128M -kernel Image -serial mon:stdio
+rootfs.tar:
+	@mkdir -p rootfs/etc rootfs/bin rootfs/home rootfs/scripts
+	@echo "Hello from external rootfs.tar mounted via Multiboot Initrd!" > rootfs/home/initrd_test.txt
+	@echo "#!/bin/sh" > rootfs/scripts/welcome.sh
+	@echo "echo === Executing /scripts/welcome.sh from TarFS ===" >> rootfs/scripts/welcome.sh
+	@echo "uname -a" >> rootfs/scripts/welcome.sh
+	@echo "echo Initrd TarFS is fully operational!" >> rootfs/scripts/welcome.sh
+	tar --format=ustar -cf rootfs.tar -C rootfs .
+
+run: Image rootfs.tar
+	qemu-system-x86_64 -m 128M -kernel Image -initrd rootfs.tar -serial mon:stdio
 
 clean:
-	rm -f $(OBJS) Image
+	rm -rf $(OBJS) Image rootfs.tar rootfs

@@ -4,6 +4,8 @@
 *.bin
 *.elf
 Image
+rootfs/
+rootfs.tar
 
 # Временные файлы редакторов
 *~

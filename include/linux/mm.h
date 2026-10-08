@@ -12,9 +12,11 @@
 
 #define HIGH_MEMORY   (128ULL * 1024 * 1024)
 
-void mem_init(void);
+void mem_init(uint64_t reserve_end);
 uint64_t get_free_page(void);
+uint64_t get_free_pages(uint32_t count);
 void free_page(uint64_t addr);
+void free_pages(uint64_t addr, uint32_t count);
 
 int map_page(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 void unmap_page(uint64_t *pml4, uint64_t virt);

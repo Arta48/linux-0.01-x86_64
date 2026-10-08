@@ -10,6 +10,7 @@
 #include <linux/utsname.h>
 #include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/multiboot.h>
 
 extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
 
@@ -180,7 +181,6 @@ static inline void u_exit(int status)
     u_syscall(__NR_exit, status, 0, 0);
 }
 
-/* Строковые вспомогательные функции */
 static void u_print(const char *s)
 {
     uint64_t len = 0;
@@ -339,7 +339,6 @@ static void print_date(uint64_t epoch)
     u_print("\n");
 }
 
-/* ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ШЕЛЛА */
 #define MAX_ENV 32
 struct env_var {
     char key[32];
@@ -451,7 +450,6 @@ static int is_var_char(char c)
     (c == '_');
 }
 
-/* ИСПРАВЛЕНИЕ: точная обработка $? и $# */
 static void expand_vars(const char *in, char *out, uint64_t max_len)
 {
     uint64_t oi = 0;
@@ -862,7 +860,6 @@ static void execute_script_args(const char *cmd_line)
             const char *lp = line;
             while (*lp == ' ' || *lp == '\t') lp++;
 
-            /* ИСПРАВЛЕНИЕ: # считается комментарием ТОЛЬКО в начале строки или после пробела! */
             if (*lp != '\0') {
                 char clean_line[128];
                 int ci = 0;
@@ -1328,7 +1325,6 @@ static void execute_command(const char *cmd)
             return;
         }
 
-        /* Разбиваем строку на аргументы argv[] для execve */
         char arg_buf[16][64];
         char *argv_ptrs[17];
         int argc = 0;
@@ -1502,14 +1498,13 @@ void user_init_process(void)
 
 void user_trampoline(void)
 {
-    /* Выделяем 16 КБ безопасного стека для шелла! */
     uint64_t s1 = get_free_page();
     get_free_page(); get_free_page(); get_free_page();
     uint64_t user_stack = s1 + 16384 - 16;
     enter_user_mode((uint64_t)user_init_process, user_stack);
 }
 
-void main(void)
+void main(uint64_t mb_magic, uint64_t mb_info_addr)
 {
     console_init();
 
@@ -1517,13 +1512,31 @@ void main(void)
     printk("   Linux 0.01 (x86_64 Edition) Booting...    \n");
     printk("==============================================\n\n");
 
+    uint64_t initrd_start = 0;
+    uint64_t initrd_end = 0;
+
+    if (mb_magic == MULTIBOOT_BOOTLOADER_MAGIC && mb_info_addr != 0) {
+        struct mb_info *mbi = (struct mb_info *)mb_info_addr;
+        if ((mbi->flags & MB_FLAG_MODS) && mbi->mods_count > 0 && mbi->mods_addr != 0) {
+            struct mb_module *mod = (struct mb_module *)((uint64_t)mbi->mods_addr);
+            initrd_start = (uint64_t)mod->mod_start;
+            initrd_end   = (uint64_t)mod->mod_end;
+            printk("[OK] Multiboot Initrd Module: %p - %p (%d KB)\n",
+                   initrd_start, initrd_end, (int)((initrd_end - initrd_start) / 1024));
+        }
+    }
+
     time_init();
     gdt_init();
     trap_init();
     syscall_init();
-    mem_init();
+    mem_init(initrd_end);
     sched_init();
     fs_init();
+
+    if (initrd_start && initrd_end) {
+        tarfs_mount(initrd_start, initrd_end);
+    }
 
     task_create(user_trampoline, 10);
 

@@ -4,85 +4,51 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/time.h>
+#include <linux/multiboot.h>
 
-/*
- * БИНАРНАЯ ПРОГРАММА: hello (автономный x86_64 машинный код)
- * Точные верифицированные байты:
- * 0x00..0x17: exec_header (24 байта)
- * 0x18..0x96: машинный код (127 байт)
- * 0x97..0xCF: строки данных
- */
 static const unsigned char bin_hello[] = {
-    /* 1. exec_header (24 байта) */
-    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C, /* "LINUS001" */
-    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, /* entry: 0x60000018 */
-    0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* text_size = 208 байт */
-
-    /* 2. Точка входа 0x60000018 */
-    /* cmpq $1, %rdi */
+    0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
+    0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
+    0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x48, 0x83, 0xff, 0x01,
-    /* jle .Ldefault (+0x63 байт -> 0x60000081) */
     0x7e, 0x63,
-
-    /* --- Ветка с аргументами: hello <имя> --- */
-    /* movq %rsi, %rbx (сохраняем argv в rbx) */
     0x48, 0x89, 0xf3,
-    /* write(1, "Hello, ", 7) */
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,       /* movq $4, %rax */
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       /* movq $1, %rdi */
-    0x48, 0x8d, 0x35, 0x79, 0x00, 0x00, 0x00,       /* leaq .Lprefix(%rip), %rsi */
-    0x48, 0xc7, 0xc2, 0x07, 0x00, 0x00, 0x00,       /* movq $7, %rdx */
-    0x0f, 0x05,                                     /* syscall */
-
-    /* rsi = argv[1] */
-    0x48, 0x8b, 0x73, 0x08,                         /* movq 8(%rbx), %rsi */
-    /* Вычисляем длину argv[1] */
-    0x48, 0x31, 0xd2,                               /* xorq %rdx, %rdx */
-    /* .Lstrlen: */
-    0x80, 0x3c, 0x16, 0x00,                         /* cmpb $0, (%rsi, %rdx) */
-    0x74, 0x05,                                     /* je .Lprint_arg */
-    0x48, 0xff, 0xc2,                               /* incq %rdx */
-    0xeb, 0xf5,                                     /* jmp .Lstrlen */
-    /* .Lprint_arg: write(1, argv[1], rdx) */
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,       /* movq $4, %rax */
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       /* movq $1, %rdi */
-    0x0f, 0x05,                                     /* syscall */
-
-    /* write(1, "!\n", 2) */
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,       /* movq $4, %rax */
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       /* movq $1, %rdi */
-    0x48, 0x8d, 0x35, 0x40, 0x00, 0x00, 0x00,       /* leaq .Lexcl(%rip), %rsi */
-    0x48, 0xc7, 0xc2, 0x02, 0x00, 0x00, 0x00,       /* movq $2, %rdx */
-    0x0f, 0x05,                                     /* syscall */
-    0xeb, 0x1e,                                     /* jmp .Lexit (+0x1E -> 0x6000009f) */
-
-    /* --- Ветка по умолчанию (.Ldefault) --- */
-    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,       /* movq $4, %rax */
-    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,       /* movq $1, %rdi */
-    0x48, 0x8d, 0x35, 0x22, 0x00, 0x00, 0x00,       /* leaq .Ldefmsg(%rip), %rsi */
-    0x48, 0xc7, 0xc2, 0x30, 0x00, 0x00, 0x00,       /* movq $48, %rdx */
-    0x0f, 0x05,                                     /* syscall */
-
-    /* --- Выход (.Lexit): exit(42) --- */
-    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,       /* movq $1, %rax */
-    0x48, 0xc7, 0xc7, 0x2a, 0x00, 0x00, 0x00,       /* movq $42, %rdi */
-    0x0f, 0x05,                                     /* syscall */
-
-    /* 3. Строки данных */
-    /* 0x97: .Lprefix */
+    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
+    0x48, 0x8d, 0x35, 0x79, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc2, 0x07, 0x00, 0x00, 0x00,
+    0x0f, 0x05,
+    0x48, 0x8b, 0x73, 0x08,
+    0x48, 0x31, 0xd2,
+    0x80, 0x3c, 0x16, 0x00,
+    0x74, 0x05,
+    0x48, 0xff, 0xc2,
+    0xeb, 0xf5,
+    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
+    0x0f, 0x05,
+    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
+    0x48, 0x8d, 0x35, 0x40, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc2, 0x02, 0x00, 0x00, 0x00,
+    0x0f, 0x05,
+    0xeb, 0x1e,
+    0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
+    0x48, 0x8d, 0x35, 0x22, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc2, 0x30, 0x00, 0x00, 0x00,
+    0x0f, 0x05,
+    0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,
+    0x48, 0xc7, 0xc7, 0x2a, 0x00, 0x00, 0x00,
+    0x0f, 0x05,
     'H', 'e', 'l', 'l', 'o', ',', ' ',
-    /* 0x9E: .Lexcl */
     '!', '\n',
-    /* 0xA0: .Ldefmsg (ровно 48 байт) */
     'H', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm', ' ',
     's', 't', 'a', 'n', 'd', 'a', 'l', 'o', 'n', 'e', ' ',
     'b', 'i', 'n', 'a', 'r', 'y', ' ', 'l', 'o', 'a', 'd', 'e', 'd', ' ',
     'b', 'y', ' ', 'e', 'x', 'e', 'c', 'v', 'e', '!', '\n'
 };
 
-/*
- * БИНАРНАЯ ПРОГРАММА: calc
- */
 static const unsigned char bin_calc[] = {
     0x31, 0x30, 0x30, 0x53, 0x55, 0x4E, 0x49, 0x4C,
     0x18, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00,
@@ -238,6 +204,167 @@ static void resolve_path(const char *in, char *out)
     memcpy(out, tmp, ti + 1);
 }
 
+int ramfs_create_dir(const char *path, uint16_t mode)
+{
+    char full[MAX_FILENAME];
+    resolve_path(path, full);
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
+            return 0;
+        }
+    }
+
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!ram_files[i].base.in_use) {
+            uint64_t len = strlen(full);
+            memcpy(ram_files[i].base.name, full, len + 1);
+            ram_files[i].base.is_dir = 1;
+            ram_files[i].base.in_use = 1;
+            ram_files[i].base.is_readonly = 0;
+            ram_files[i].base.size = 0;
+            ram_files[i].base.capacity = 0;
+            ram_files[i].base.mtime = get_current_time();
+            ram_files[i].base.uid = 0;
+            ram_files[i].base.gid = 0;
+            ram_files[i].base.mode = mode ? mode : 0755;
+            ram_files[i].base.data = NULL;
+            ram_files[i].is_proc = 0;
+            ram_files[i].generator = NULL;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int ramfs_create_file(const char *path, const char *data, uint64_t size, uint16_t mode, uint16_t uid, uint16_t gid, uint64_t mtime)
+{
+    char full[MAX_FILENAME];
+    resolve_path(path, full);
+
+    int idx = -1;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
+            idx = i;
+            break;
+        }
+    }
+
+    uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages == 0) pages = 1;
+
+    if (idx != -1) {
+        if (ram_files[idx].base.capacity < size) {
+            uint64_t new_page = get_free_pages(pages);
+            if (!new_page) return -1;
+            ram_files[idx].base.data = (char *)new_page;
+            ram_files[idx].base.capacity = pages * PAGE_SIZE;
+        }
+    } else {
+        for (int i = 0; i < MAX_FILES; i++) {
+            if (!ram_files[i].base.in_use) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == -1) return -1;
+
+        uint64_t page = get_free_pages(pages);
+        if (!page) return -1;
+
+        uint64_t len = strlen(full);
+        memcpy(ram_files[idx].base.name, full, len + 1);
+        ram_files[idx].base.data = (char *)page;
+        ram_files[idx].base.capacity = pages * PAGE_SIZE;
+        ram_files[idx].is_proc = 0;
+        ram_files[idx].generator = NULL;
+    }
+
+    if (data && size > 0) {
+        memcpy(ram_files[idx].base.data, data, size);
+    }
+    ram_files[idx].base.data[size] = '\0';
+    ram_files[idx].base.size = size;
+    ram_files[idx].base.mtime = mtime ? mtime : get_current_time();
+    ram_files[idx].base.uid = uid;
+    ram_files[idx].base.gid = gid;
+    ram_files[idx].base.mode = mode ? mode : 0644;
+    ram_files[idx].base.in_use = 1;
+    ram_files[idx].base.is_readonly = 0;
+    ram_files[idx].base.is_dir = 0;
+
+    return 0;
+}
+
+static uint64_t parse_octal(const char *s, int len)
+{
+    uint64_t val = 0;
+    while (len > 0 && (*s == ' ' || *s == '\0')) {
+        s++;
+        len--;
+    }
+    while (len > 0 && *s >= '0' && *s <= '7') {
+        val = (val << 3) | (*s - '0');
+        s++;
+        len--;
+    }
+    return val;
+}
+
+void tarfs_mount(uint64_t archive_start, uint64_t archive_end)
+{
+    if (archive_start == 0 || archive_end <= archive_start) return;
+
+    printk("[TARFS] Unpacking Initrd archive at %p - %p (%d KB)...\n",
+           archive_start, archive_end, (int)((archive_end - archive_start) / 1024));
+
+    uint64_t ptr = archive_start;
+    int files_extracted = 0;
+
+    while (ptr + 512 <= archive_end) {
+        struct tar_header *hdr = (struct tar_header *)ptr;
+
+        if (hdr->name[0] == '\0') {
+            break;
+        }
+
+        uint64_t file_size = parse_octal(hdr->size, sizeof(hdr->size));
+        uint16_t mode = (uint16_t)parse_octal(hdr->mode, sizeof(hdr->mode));
+        uint16_t uid = (uint16_t)parse_octal(hdr->uid, sizeof(hdr->uid));
+        uint16_t gid = (uint16_t)parse_octal(hdr->gid, sizeof(hdr->gid));
+        uint64_t mtime = parse_octal(hdr->mtime, sizeof(hdr->mtime));
+        if (mtime == 0) mtime = startup_time;
+
+        char full_path[MAX_FILENAME];
+        const char *name_src = hdr->name;
+        if (name_src[0] == '.' && name_src[1] == '/') name_src += 2;
+
+        int fi = 0;
+        if (name_src[0] != '/') full_path[fi++] = '/';
+        while (*name_src && fi < MAX_FILENAME - 1) {
+            full_path[fi++] = *name_src++;
+        }
+        full_path[fi] = '\0';
+
+        while (fi > 1 && full_path[fi - 1] == '/') {
+            full_path[--fi] = '\0';
+        }
+
+        if (hdr->typeflag == '5' || (hdr->typeflag == '\0' && hdr->name[strlen(hdr->name) - 1] == '/')) {
+            ramfs_create_dir(full_path, mode ? mode : 0755);
+        } else {
+            const char *file_data = (const char *)(ptr + 512);
+            ramfs_create_file(full_path, file_data, file_size, mode ? mode : 0644, uid, gid, mtime);
+            files_extracted++;
+        }
+
+        uint64_t aligned_size = (file_size + 511) & ~511ULL;
+        ptr += 512 + aligned_size;
+    }
+
+    printk("[OK] TarFS Mounted: Extracted %d files into root filesystem.\n", files_extracted);
+}
+
 void fs_init(void)
 {
     for (int i = 0; i < MAX_FILES; i++) {
@@ -287,7 +414,8 @@ void fs_init(void)
         "  - Real-Time Clock (CMOS RTC) & ls -l\n"
         "  - Dynamic ProcFS (/proc/cpuinfo, /proc/meminfo)\n"
         "  - Multi-user authentication: UID, GID, su, chmod\n"
-        "  - Shell scripts execution (sh /etc/init.sh)\n",
+        "  - Shell scripts execution (sh /etc/init.sh)\n"
+        "  - Multiboot Initrd TarFS integration\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
@@ -337,7 +465,7 @@ void fs_init(void)
     ram_files[m_idx].is_proc = 1;
     ram_files[m_idx].generator = generate_meminfo;
 
-    printk("[OK] Multi-user VFS Initialized with /etc/init.sh\n");
+    printk("[OK] Multi-user VFS Initialized\n");
 }
 
 const char *fs_get_file_data(const char *name, uint64_t *out_size)
@@ -612,34 +740,7 @@ int64_t sys_chdir(const char *path)
 
 int64_t sys_mkdir(const char *path)
 {
-    char full[MAX_FILENAME];
-    resolve_path(path, full);
-
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) {
-            return -1;
-        }
-    }
-
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (!ram_files[i].base.in_use) {
-            uint64_t len = strlen(full);
-            memcpy(ram_files[i].base.name, full, len + 1);
-            ram_files[i].base.is_dir = 1;
-            ram_files[i].base.in_use = 1;
-            ram_files[i].base.is_readonly = 0;
-            ram_files[i].base.size = 0;
-            ram_files[i].base.mtime = get_current_time();
-            ram_files[i].base.uid = current->euid;
-            ram_files[i].base.gid = current->egid;
-            ram_files[i].base.mode = 0755;
-            ram_files[i].base.data = NULL;
-            ram_files[i].is_proc = 0;
-            ram_files[i].generator = NULL;
-            return 0;
-        }
-    }
-    return -1;
+    return ramfs_create_dir(path, 0755);
 }
 
 int64_t sys_rmdir(const char *path)

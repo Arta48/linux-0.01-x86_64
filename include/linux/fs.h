@@ -5,8 +5,8 @@
 #include <linux/stat.h>
 
 #define NR_OPEN       16
-#define MAX_FILENAME  48
-#define MAX_FILES     32
+#define MAX_FILENAME  80
+#define MAX_FILES     128
 #define PIPE_BUF_SIZE 4064
 
 #define FILE_TYPE_REGULAR 1
@@ -62,6 +62,10 @@ struct file {
 };
 
 void fs_init(void);
+void tarfs_mount(uint64_t archive_start, uint64_t archive_end);
+int ramfs_create_dir(const char *path, uint16_t mode);
+int ramfs_create_file(const char *path, const char *data, uint64_t size, uint16_t mode, uint16_t uid, uint16_t gid, uint64_t mtime);
+
 int64_t sys_open(const char *filename, int flags);
 int64_t sys_close(int fd);
 int64_t sys_file_read(int fd, char *buf, uint64_t count);
