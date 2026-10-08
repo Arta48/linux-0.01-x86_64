@@ -74,6 +74,38 @@ rootfs.tar:
 	@echo "echo === Executing /scripts/welcome.sh from TarFS ===" >> rootfs/scripts/welcome.sh
 	@echo "uname -a" >> rootfs/scripts/welcome.sh
 	@echo "echo Initrd TarFS is fully operational!" >> rootfs/scripts/welcome.sh
+	@echo "#!/bin/sh" > rootfs/scripts/test_control.sh
+	@echo "echo === 1. Testing Conditionals (if / then / else / fi) ===" >> rootfs/scripts/test_control.sh
+	@echo "VAL=10" >> rootfs/scripts/test_control.sh
+	@echo "if [ \$$VAL -gt 5 ]" >> rootfs/scripts/test_control.sh
+	@echo "then" >> rootfs/scripts/test_control.sh
+	@echo "    echo [PASS] VAL is greater than 5" >> rootfs/scripts/test_control.sh
+	@echo "else" >> rootfs/scripts/test_control.sh
+	@echo "    echo [FAIL] VAL is not greater than 5" >> rootfs/scripts/test_control.sh
+	@echo "fi" >> rootfs/scripts/test_control.sh
+	@echo "if [ -f /etc/passwd ]" >> rootfs/scripts/test_control.sh
+	@echo "then" >> rootfs/scripts/test_control.sh
+	@echo "    echo [PASS] /etc/passwd exists" >> rootfs/scripts/test_control.sh
+	@echo "fi" >> rootfs/scripts/test_control.sh
+	@echo "if [ -d /nonexistent ]" >> rootfs/scripts/test_control.sh
+	@echo "then" >> rootfs/scripts/test_control.sh
+	@echo "    echo [FAIL] Directory should not exist" >> rootfs/scripts/test_control.sh
+	@echo "else" >> rootfs/scripts/test_control.sh
+	@echo "    echo [PASS] /nonexistent correctly detected as absent" >> rootfs/scripts/test_control.sh
+	@echo "fi" >> rootfs/scripts/test_control.sh
+	@echo "echo === 2. Testing For Loop ===" >> rootfs/scripts/test_control.sh
+	@echo "for item in alpha beta gamma" >> rootfs/scripts/test_control.sh
+	@echo "do" >> rootfs/scripts/test_control.sh
+	@echo "    echo Item: \$$item" >> rootfs/scripts/test_control.sh
+	@echo "done" >> rootfs/scripts/test_control.sh
+	@echo "echo === 3. Testing While Loop and let ===" >> rootfs/scripts/test_control.sh
+	@echo "NUM=1" >> rootfs/scripts/test_control.sh
+	@echo "while [ \$$NUM -le 3 ]" >> rootfs/scripts/test_control.sh
+	@echo "do" >> rootfs/scripts/test_control.sh
+	@echo "    echo Loop step: \$$NUM" >> rootfs/scripts/test_control.sh
+	@echo "    let NUM = \$$NUM + 1" >> rootfs/scripts/test_control.sh
+	@echo "done" >> rootfs/scripts/test_control.sh
+	@echo "echo === All Stage 30 control tests passed! ===" >> rootfs/scripts/test_control.sh
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
 run: Image rootfs.tar
