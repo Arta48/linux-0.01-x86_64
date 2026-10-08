@@ -191,7 +191,7 @@ static void u_print(const char *s)
 static void u_print_num(uint64_t n)
 {
     char buf[32];
-    char digits[] = "0123456789";
+    static const char digits[] = "0123456789";
     int i = 0;
     if (n == 0) {
         u_print("0");
@@ -209,7 +209,7 @@ static void u_print_num(uint64_t n)
 static void u_print_octal(uint32_t n)
 {
     char buf[16];
-    char digits[] = "01234567";
+    static const char digits[] = "01234567";
     int i = 0;
     if (n == 0) {
         u_print("0");
@@ -459,7 +459,6 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
         if (*in == '$') {
             in++;
 
-            /* $? - код возврата последней команды */
             if (*in == '?') {
                 char nb[16]; int ni = 0; int v = last_exit_code;
                 if (v == 0) nb[ni++] = '0';
@@ -469,7 +468,6 @@ static void expand_vars(const char *in, char *out, uint64_t max_len)
                 continue;
             }
 
-            /* $# - количество переданных аргументов */
             if (*in == '#') {
                 const char *val = env_get("#");
                 if (val) {
@@ -864,10 +862,16 @@ static void execute_script_args(const char *cmd_line)
             const char *lp = line;
             while (*lp == ' ' || *lp == '\t') lp++;
 
-            if (*lp != '\0' && *lp != '#') {
+            /* ИСПРАВЛЕНИЕ: # считается комментарием ТОЛЬКО в начале строки или после пробела! */
+            if (*lp != '\0') {
                 char clean_line[128];
                 int ci = 0;
-                while (*lp && *lp != '#' && ci < 127) clean_line[ci++] = *lp++;
+                while (*lp && ci < 127) {
+                    if (*lp == '#' && (ci == 0 || clean_line[ci - 1] == ' ' || clean_line[ci - 1] == '\t')) {
+                        break;
+                    }
+                    clean_line[ci++] = *lp++;
+                }
                 while (ci > 0 && (clean_line[ci - 1] == ' ' || clean_line[ci - 1] == '\t')) ci--;
                 clean_line[ci] = '\0';
 
@@ -951,7 +955,7 @@ static void execute_command(const char *cmd)
         u_print("  whoami / id     - print current user / group info\n");
         u_print("  su [user]       - switch user (password check)\n");
         u_print("  chmod <mod> <f> - change file permissions\n");
-        u_print("  echo $VAR       - variable expansion ($?, $PWD, $USER)\n");
+        u_print("  echo $VAR       - variable expansion ($?, $PWD, $USER, $#)\n");
         u_print("  export K=V / env- environment variables management\n");
         u_print("  <cmd> & / jobs  - background process execution (&)\n");
         u_print("  grep <pat> [f]  - search pattern in file or stream\n");
@@ -962,7 +966,7 @@ static void execute_command(const char *cmd)
         u_print("  ls [-l] [dir]   - list files (compact or detailed -l)\n");
         u_print("  mkdir / rmdir   - directory management\n");
         u_print("  cat / touch / rm- file management\n");
-        u_print("  <binary>        - execute binary via fork() + execve()\n");
+        u_print("  <binary> [args] - execute binary via fork() + execve()\n");
         u_print("  sigtest         - test Ring 3 custom SIGINT handler\n");
         u_print("  date / sleep    - system time & sleeping\n");
         u_print("  ps / kill / wait- process management\n");
@@ -1324,21 +1328,44 @@ static void execute_command(const char *cmd)
             return;
         }
 
+        /* Разбиваем строку на аргументы argv[] для execve */
+        char arg_buf[16][64];
+        char *argv_ptrs[17];
+        int argc = 0;
+
+        const char *ap = exec_cmd;
+        while (*ap) {
+            while (*ap == ' ') ap++;
+            if (*ap == '\0') break;
+
+            int ai = 0;
+            while (*ap && *ap != ' ' && ai < 63) {
+                arg_buf[argc][ai++] = *ap++;
+            }
+            arg_buf[argc][ai] = '\0';
+            strip_quotes(arg_buf[argc]);
+
+            argv_ptrs[argc] = arg_buf[argc];
+            argc++;
+            if (argc >= 16) break;
+        }
+        argv_ptrs[argc] = NULL;
+
         int64_t pid = u_fork();
         if (pid == 0) {
-            int64_t err = u_execve(exec_cmd, NULL, NULL);
+            int64_t err = u_execve(argv_ptrs[0], argv_ptrs, NULL);
             if (err < 0) {
                 char bin_path[64];
                 bin_path[0] = '/'; bin_path[1] = 'b'; bin_path[2] = 'i'; bin_path[3] = 'n'; bin_path[4] = '/';
                 uint64_t bi = 5;
-                for (uint64_t k = 0; exec_cmd[k] && bi < sizeof(bin_path) - 1; k++) {
-                    bin_path[bi++] = exec_cmd[k];
+                for (uint64_t k = 0; argv_ptrs[0][k] && bi < sizeof(bin_path) - 1; k++) {
+                    bin_path[bi++] = argv_ptrs[0][k];
                 }
                 bin_path[bi] = '\0';
-                err = u_execve(bin_path, NULL, NULL);
+                err = u_execve(bin_path, argv_ptrs, NULL);
             }
             if (err < 0) {
-                u_print("shell: command not found: "); u_print(exec_cmd); u_print("\n");
+                u_print("shell: command not found: "); u_print(argv_ptrs[0]); u_print("\n");
                 u_exit(127);
             }
         } else if (pid > 0) {
@@ -1475,7 +1502,10 @@ void user_init_process(void)
 
 void user_trampoline(void)
 {
-    uint64_t user_stack = get_free_page() + PAGE_SIZE - 16;
+    /* Выделяем 16 КБ безопасного стека для шелла! */
+    uint64_t s1 = get_free_page();
+    get_free_page(); get_free_page(); get_free_page();
+    uint64_t user_stack = s1 + 16384 - 16;
     enter_user_mode((uint64_t)user_init_process, user_stack);
 }
 

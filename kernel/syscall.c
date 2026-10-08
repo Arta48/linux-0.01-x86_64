@@ -324,7 +324,6 @@ static int64_t sys_brk(uint64_t new_brk)
 
 static int64_t sys_execve(const char *filename, char **argv, char **envp, struct trap_frame *tf)
 {
-    (void)argv;
     (void)envp;
 
     if (!tf) return -1;
@@ -340,20 +339,59 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
         return -1;
     }
 
+    /* 1. БЕЗОПАСНО копируем argv в буфер ядра ДО освобождения стека */
+    int argc = 0;
+    char k_argv_buf[16][64];
+    while (argv && argv[argc] && argc < 15) {
+        uint64_t len = strlen(argv[argc]);
+        if (len >= 63) len = 63;
+        memcpy(k_argv_buf[argc], argv[argc], len);
+        k_argv_buf[argc][len] = '\0';
+        argc++;
+    }
+    if (argc == 0) {
+        uint64_t len = strlen(filename);
+        if (len >= 63) len = 63;
+        memcpy(k_argv_buf[0], filename, len);
+        k_argv_buf[0][len] = '\0';
+        argc = 1;
+    }
+
+    /* 2. Загружаем бинарник по адресу 0x60000000 */
     uint64_t text_phys = get_free_page();
     if (!text_phys) return -1;
     map_page(NULL, USER_TEXT_BASE, text_phys, PTE_WRITABLE | PTE_USER);
-
     memcpy((void *)USER_TEXT_BASE, data, file_size);
 
+    /* 3. Выделяем щедрый стек пользователя на 16 КБ (4 страницы) */
     uint64_t new_stack = get_free_page();
     if (!new_stack) return -1;
+    get_free_page(); get_free_page(); get_free_page();
 
     if (current->user_stack_page) {
         free_page(current->user_stack_page);
     }
     current->user_stack_page = new_stack;
-    uint64_t user_rsp = new_stack + PAGE_SIZE - 16;
+    uint64_t user_rsp = new_stack + 16384 - 16;
+
+    /* 4. Раскладываем строки аргументов на стеке */
+    uint64_t u_argv_ptrs[18];
+    for (int i = 0; i < argc; i++) {
+        uint64_t slen = strlen(k_argv_buf[i]) + 1;
+        user_rsp -= slen;
+        memcpy((void *)user_rsp, k_argv_buf[i], slen);
+        u_argv_ptrs[i] = user_rsp;
+    }
+    u_argv_ptrs[argc] = 0;
+
+    user_rsp &= ~15ULL;
+
+    uint64_t argv_table_size = (argc + 1) * sizeof(uint64_t);
+    user_rsp -= argv_table_size;
+    memcpy((void *)user_rsp, u_argv_ptrs, argv_table_size);
+    uint64_t argv_ptr = user_rsp;
+
+    if ((user_rsp % 16) == 0) user_rsp -= 8;
 
     current->start_brk = HEAP_START_VIRT;
     current->brk = HEAP_START_VIRT;
@@ -367,6 +405,8 @@ static int64_t sys_execve(const char *filename, char **argv, char **envp, struct
     tf->rip = hdr->entry;
     tf->rsp = user_rsp;
     tf->rbp = user_rsp;
+    tf->rdi = (uint64_t)argc;
+    tf->rsi = argv_ptr;
     tf->rax = 0;
     tf->rflags = 0x202;
 
