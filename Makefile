@@ -16,7 +16,7 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
-                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest
+                rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest
 
 all: Image rootfs.tar disk.img
 
@@ -137,6 +137,13 @@ rootfs/bin/hdtest: user/crt0.o user/hdtest.o user/ulibc.o user/user.ld
 rootfs/bin/mintest: user/crt0.o user/mintest.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/mintest.o user/ulibc.o -o rootfs/bin/mintest
+
+user/cowtest.o: user/cowtest.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/cowtest.c -o user/cowtest.o
+
+rootfs/bin/cowtest: user/crt0.o user/cowtest.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/cowtest.o user/ulibc.o -o rootfs/bin/cowtest
 
 disk.img:
 	@if [ ! -f disk.img ]; then \

@@ -148,6 +148,13 @@ void isr_handler(struct trap_frame *tf)
         return;
     }
 
+    /* Перехват Page Fault для механизма Copy-On-Write */
+    if (tf->int_no == 14) {
+        if (do_page_fault(tf) == 0) {
+            return; /* Страница успешно скопирована по COW, продолжаем процесс! */
+        }
+    }
+
     __asm__ volatile ("cli");
 
     if (tf->int_no < 20) {

@@ -28,4 +28,8 @@ void free_process_pml4(uint64_t pml4_phys);
 uint32_t get_free_pages_count(void);
 uint32_t get_total_pages_count(void);
 
+struct trap_frame;
+int do_page_fault(struct trap_frame *tf);
+int do_wp_page(uint64_t *pte, uint64_t addr);
+
 #endif

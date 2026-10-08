@@ -1,4 +1,5 @@
 #include <linux/mm.h>
+#include <linux/traps.h>
 #include <linux/tty.h>
 #include <linux/string.h>
 
@@ -210,14 +211,19 @@ uint64_t copy_process_pml4(uint64_t parent_pml4)
 
                 uint64_t virt = (pdpt_idx << 30) | (pd_idx << 21) | (pt_idx << 12);
 
-                uint64_t child_phys = get_free_page();
-                if (!child_phys) {
-                    free_process_pml4(child_pml4_phys);
-                    return 0;
+                /* Механизм Copy-On-Write (COW):
+                 * Сбрасываем флаг записи у родителя и ребенка, увеличиваем счетчик ссылок */
+                flags &= ~PTE_WRITABLE;
+                p_pt[pt_idx] = (parent_phys & ~0xFFFULL) | flags | PTE_PRESENT;
+                invlpg(virt);
+
+                /* Увеличиваем счетчик ссылок на физическую страницу в mem_map */
+                if (parent_phys >= low_mem && parent_phys < HIGH_MEMORY) {
+                    uint32_t idx = (parent_phys - low_mem) / PAGE_SIZE;
+                    mem_map[idx]++;
                 }
 
-                memcpy((void *)child_phys, (void *)parent_phys, PAGE_SIZE);
-                map_page((uint64_t *)child_pml4_phys, virt, child_phys, flags);
+                map_page((uint64_t *)child_pml4_phys, virt, parent_phys, flags);
             }
         }
     }
@@ -268,4 +274,61 @@ uint32_t get_free_pages_count(void)
 uint32_t get_total_pages_count(void)
 {
     return paging_pages;
+}
+
+int do_wp_page(uint64_t *pte, uint64_t addr)
+{
+    uint64_t old_page = *pte & ~0xFFFULL;
+    uint32_t idx = (old_page >= low_mem && old_page < HIGH_MEMORY) ? (old_page - low_mem) / PAGE_SIZE : 0;
+
+    /* Если страницу больше никто не делит — просто возвращаем права на запись */
+    if (mem_map[idx] <= 1) {
+        *pte |= PTE_WRITABLE;
+        invlpg(addr);
+        return 0;
+    }
+
+    /* Иначе выделяем приватную копию страницы для пишущего процесса */
+    uint64_t new_page = get_free_page();
+    if (!new_page) return -1;
+
+    memcpy((void *)new_page, (void *)old_page, PAGE_SIZE);
+    mem_map[idx]--;
+
+    *pte = new_page | (*pte & 0xFFFULL) | PTE_WRITABLE | PTE_PRESENT;
+    invlpg(addr);
+    return 0;
+}
+
+int do_page_fault(struct trap_frame *tf)
+{
+    uint64_t cr2;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+    /* Бит 1 (0x02) в error_code означает попытку записи */
+    if (tf->error_code & 0x02) {
+        uint64_t cr3;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+        uint64_t *pml4 = (uint64_t *)(cr3 & ~0xFFFULL);
+
+        uint64_t pml4_idx = (cr2 >> 39) & 0x1FF;
+        uint64_t pdpt_idx = (cr2 >> 30) & 0x1FF;
+        uint64_t pd_idx   = (cr2 >> 21) & 0x1FF;
+        uint64_t pt_idx   = (cr2 >> 12) & 0x1FF;
+
+        if (pml4[pml4_idx] & PTE_PRESENT) {
+            uint64_t *pdpt = (uint64_t *)(pml4[pml4_idx] & ~0xFFFULL);
+            if (pdpt[pdpt_idx] & PTE_PRESENT) {
+                uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
+                if (pd[pd_idx] & PTE_PRESENT) {
+                    uint64_t *pt = (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
+                    /* Страница присутствует в памяти, но закрыта для записи — это COW */
+                    if ((pt[pt_idx] & PTE_PRESENT) && !(pt[pt_idx] & PTE_WRITABLE)) {
+                        return do_wp_page(&pt[pt_idx], cr2);
+                    }
+                }
+            }
+        }
+    }
+    return -1;
 }
