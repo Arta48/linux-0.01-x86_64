@@ -19,7 +19,7 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
                 rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest \
                 rootfs/bin/smpinfo rootfs/bin/threadtest rootfs/bin/nettest rootfs/bin/ping \
-                rootfs/bin/httpd
+                rootfs/bin/httpd rootfs/bin/tcc rootfs/bin/cc
 
 all: Image rootfs.tar disk.img
 
@@ -204,6 +204,17 @@ rootfs/bin/httpd: user/crt0.o user/httpd.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/httpd.o user/ulibc.o -o rootfs/bin/httpd
 
+user/tcc.o: user/tcc.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/tcc.c -o user/tcc.o
+
+rootfs/bin/tcc: user/crt0.o user/tcc.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/tcc.o user/ulibc.o -o rootfs/bin/tcc
+
+rootfs/bin/cc: rootfs/bin/tcc
+	@mkdir -p rootfs/bin
+	cp rootfs/bin/tcc rootfs/bin/cc
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
@@ -216,6 +227,33 @@ rootfs.tar: $(USER_BINARIES)
 	@echo "echo === Executing /scripts/welcome.sh from TarFS ===" >> rootfs/scripts/welcome.sh
 	@echo "uname -a" >> rootfs/scripts/welcome.sh
 	@echo "echo Initrd TarFS is fully operational!" >> rootfs/scripts/welcome.sh
+	@echo "/* Демонстрационная программа на Си для тестирования /bin/tcc */" > rootfs/home/prime.c
+	@echo "int is_prime(int n) {" >> rootfs/home/prime.c
+	@echo "    if (n <= 1) return 0;" >> rootfs/home/prime.c
+	@echo "    int i;" >> rootfs/home/prime.c
+	@echo "    for (i = 2; i * i <= n; i++) {" >> rootfs/home/prime.c
+	@echo "        if (n % i == 0) return 0;" >> rootfs/home/prime.c
+	@echo "    }" >> rootfs/home/prime.c
+	@echo "    return 1;" >> rootfs/home/prime.c
+	@echo "}" >> rootfs/home/prime.c
+	@echo "" >> rootfs/home/prime.c
+	@echo "int main() {" >> rootfs/home/prime.c
+	@echo "    print(\"=== Calculating Prime Numbers in Ring 3 via Self-Hosting TCC ===\\n\");" >> rootfs/home/prime.c
+	@echo "    int count = 0;" >> rootfs/home/prime.c
+	@echo "    int i;" >> rootfs/home/prime.c
+	@echo "    for (i = 2; i <= 50; i++) {" >> rootfs/home/prime.c
+	@echo "        if (is_prime(i)) {" >> rootfs/home/prime.c
+	@echo "            print(\"Prime: \");" >> rootfs/home/prime.c
+	@echo "            print_num(i);" >> rootfs/home/prime.c
+	@echo "            print(\"\\n\");" >> rootfs/home/prime.c
+	@echo "            count++;" >> rootfs/home/prime.c
+	@echo "        }" >> rootfs/home/prime.c
+	@echo "    }" >> rootfs/home/prime.c
+	@echo "    print(\"Total primes found: \");" >> rootfs/home/prime.c
+	@echo "    print_num(count);" >> rootfs/home/prime.c
+	@echo "    print(\"\\n\");" >> rootfs/home/prime.c
+	@echo "    return 0;" >> rootfs/home/prime.c
+	@echo "}" >> rootfs/home/prime.c
 	tar --format=ustar -cf rootfs.tar -C rootfs .
 
 run: Image rootfs.tar disk.img
