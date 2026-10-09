@@ -42,7 +42,12 @@ struct xhci_info {
     struct xhci_port_status ports[16];
 };
 
+/* Находит xHCI, забирает управление у BIOS, поднимает USB HID boot-клавиатуру.
+ * Возвращает 1, если клавиатура найдена и запущена. */
 int  xhci_init(void);
+void usb_kbd_poll(void);              /* вызывается из таймерного прерывания */
+void usb_hid_report(const uint8_t *r);
+void usb_hid_tick(void);
 const struct xhci_info *xhci_get_info(void);
 
 #endif

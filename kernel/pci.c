@@ -2,7 +2,7 @@
 #include <linux/tty.h>
 #include <asm/io.h>
 
-#define MAX_PCI_DEVS 32
+#define MAX_PCI_DEVS 128
 static struct pci_device pci_devices[MAX_PCI_DEVS];
 static int pci_dev_count = 0;
 

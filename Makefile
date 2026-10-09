@@ -17,7 +17,7 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o kernel/hd.o kernel/smp.o kernel/trampoline.o \
-       kernel/kthread.o kernel/pci.o kernel/xhci.o kernel/e1000.o kernel/net.o kernel/net_stack.o \
+       kernel/kthread.o kernel/pci.o kernel/xhci.o kernel/usb_kbd.o kernel/e1000.o kernel/net.o kernel/net_stack.o \
        fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
@@ -182,6 +182,9 @@ kernel/pci.o: kernel/pci.c
 kernel/xhci.o: kernel/xhci.c
 	$(CC) $(CFLAGS) -c kernel/xhci.c -o kernel/xhci.o
 
+kernel/usb_kbd.o: kernel/usb_kbd.c
+	$(CC) $(CFLAGS) -c kernel/usb_kbd.c -o kernel/usb_kbd.o
+
 kernel/e1000.o: kernel/e1000.c
 	$(CC) $(CFLAGS) -c kernel/e1000.c -o kernel/e1000.o
 
@@ -331,6 +334,15 @@ run: Image rootfs.tar disk.img usbdisk.img
 	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar \
 	-drive file=disk.img,format=raw,index=0,media=disk \
 	-device qemu-xhci,id=xhci -drive file=usbdisk.img,format=raw,if=none,id=usb0 -device usb-storage,bus=xhci.0,drive=usb0 \
+	-netdev user,id=net0,hostfwd=tcp::8080-:80 \
+	-device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
+
+# Этап 48: то же, что run, но с USB HID клавиатурой на xHCI (проверка драйвера xhci.c в QEMU;
+# ввод с окна QEMU идёт на USB-клавиатуру, COM1 остаётся запасным каналом)
+run-usb: Image rootfs.tar disk.img usbdisk.img
+	qemu-system-x86_64 -smp 2 -m 128M -kernel Image -initrd rootfs.tar \
+	-drive file=disk.img,format=raw,index=0,media=disk \
+	-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
 	-netdev user,id=net0,hostfwd=tcp::8080-:80 \
 	-device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
 

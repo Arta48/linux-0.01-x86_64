@@ -60,6 +60,18 @@ static void kbd_push_char(char c)
     }
 }
 
+void keyboard_inject_char(char c)
+{
+    kbd_push_char(c);
+}
+
+void keyboard_inject_sigint(void)
+{
+    if (current && current->pid > 0) {
+        send_signal(current, SIGINT);
+    }
+}
+
 void keyboard_handler(void)
 {
     uint8_t scancode = inb(KBD_DATA_PORT);

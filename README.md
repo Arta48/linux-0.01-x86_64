@@ -33,7 +33,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 
 ---
 
-## 🗺️ Реализованные этапы (Stages 1 – 47)
+## 🗺️ Реализованные этапы (Stages 1 – 48)
 
 * **Stage 1:** Multiboot-загрузка, 4-уровневый пейджинг (PML4, PDPT, PD 2MB Huge Pages), переход в Long Mode, видеовывод VGA `0xB8000` и COM1 `0x3F8`.
 * **Stage 2:** 64-битная IDT (16-байтовые шлюзы), перепрограммирование PIC 8259 на векторы 32..47, таймер PIT (100 Гц), счётчик `jiffies`.
@@ -84,7 +84,9 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 * **Stage 46:** Загрузчик UEFI `BOOTX64.EFI` (PE32+, собирается `tools/mkefi`), GOP, образ LiveUSB (`liveusb.img`, `tools/mkesp`).
 * **Stage 47:** Исправление загрузки на реальном железе (UEFI) и консоль на фреймбуфере. Загрузчик теперь резервирует память ядра/initrd через `AllocateAddress`, берёт размеры файлов через `GetInfo`, не использует `.bss`, выбирает непрерывную свободную область по карте памяти UEFI и сообщает ядру её границу (`MB_FLAG_UEFI`/`mem_upper`); при ошибке показывает причину, а не перезагружает ПК. Ядро: `mem_init()` с проверкой границ (раньше underflow приводил к triple fault), одноядерный режим на UEFI, COM1 с ограниченным ожиданием, буферный кэш больше не путает диск 0 со «свободным» буфером, Minix не форматирует чужой диск, исключение в Ring 3 завершает только процесс.
 
-> **Известное ограничение (решается в Stage 48):** после `ExitBootServices` прошивка перестаёт эмулировать USB-клавиатуру как PS/2, поэтому на реальном ПК ввод с USB-клавиатуры не работает, пока не готов драйвер USB HID (xHCI).
+* **Stage 48:** Драйвер USB HID клавиатуры на собственном стеке xHCI (`kernel/xhci.c`, `kernel/usb_kbd.c`): BIOS/OS handoff (отключение SMI и PS/2-эмуляции прошивки), сброс контроллера, DCBAA + scratchpad, Command/Event/Transfer-кольца TRB, Enable Slot / Address Device / Evaluate Context / Configure Endpoint, control-передачи (дескрипторы, `SET_CONFIGURATION`, `SET_PROTOCOL` boot, `SET_IDLE`), Interrupt IN endpoint, опрос событий из таймерного IRQ0, преобразование HID Usage → ASCII (Shift, CapsLock, Ctrl+буква, Ctrl+C → SIGINT, стрелки, Home/End, цифровой блок, автоповтор). Исправлено падение `#GP(0x18)` после запуска `/bin/sh` на AMD: `STAR[63:48]` = `0x13` (AMD не добавляет RPL=3 к SS при `sysret`). Цвет консоли по умолчанию — белый. Цель `make run-usb` проверяет драйвер в QEMU.
+
+> **Ограничения Stage 48:** USB-хабы не поддерживаются (клавиатура должна быть на корневом порту контроллера); светодиоды CapsLock/NumLock не включаются; хот-плаг не обрабатывается (клавиатура ищется при загрузке); USB-накопители — отдельный этап. Драйвер проверен только сборкой, на реальном железе требуется тест.
 
 ---
 

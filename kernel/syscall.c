@@ -41,7 +41,11 @@ void syscall_init(void)
     efer |= 1ULL;
     wrmsr(MSR_EFER, efer);
 
-    uint64_t star = ((uint64_t)0x0010 << 48) | ((uint64_t)0x0008 << 32);
+    /* STAR[63:48] = 0x13, а не 0x10: SYSRET берёт SS = STAR+8, CS = STAR+16.
+     * Процессоры AMD (в отличие от QEMU) НЕ добавляют RPL=3 к SS сами, поэтому
+     * RPL должен быть уже в значении STAR: SS = 0x1B, CS = 0x23. Иначе в кадре
+     * лежит SS=0x18 (RPL 0) и последующий iretq даёт #GP(0x18). */
+    uint64_t star = ((uint64_t)0x0013 << 48) | ((uint64_t)0x0008 << 32);
     wrmsr(MSR_STAR, star);
     wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
     wrmsr(MSR_SFMASK, 0x200);

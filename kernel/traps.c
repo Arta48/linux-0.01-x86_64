@@ -116,6 +116,8 @@ void isr_handler(struct trap_frame *tf)
             check_serial_events(); /* Асинхронный опрос терминала каждые 10 мс */
             extern void net_poll(void);
             net_poll();
+            extern void usb_kbd_poll(void);
+            usb_kbd_poll();
             outb(0x20, 0x20);
             do_timer();
 

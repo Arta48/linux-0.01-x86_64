@@ -14,7 +14,7 @@ static uint32_t fb_pitch = 0;
 
 static int cursor_x = 0;
 static int cursor_y = 0;
-static uint32_t current_fg = 0x00FF66; /* Хакерский зеленый, как в tty */
+static uint32_t current_fg = 0xFFFFFF; /* Белый, как в обычной tty */
 static uint32_t current_bg = 0x000000; /* Черный фон */
 
 /* Минималистичный системный шрифт 8x8 (ASCII 32-127) */
