@@ -6,6 +6,9 @@ CFLAGS = -Wall -Wextra -O2 -m64 -mcmodel=kernel -ffreestanding \
 USER_CFLAGS = -Wall -Wextra -O2 -m64 -ffreestanding -nostdinc \
               -fno-stack-protector -fno-pie -no-pie -mno-red-zone -Iuser -Iinclude
 
+UEFI_CFLAGS = -Wall -Wextra -O2 -m64 -ffreestanding -fshort-wchar \
+              -fno-stack-protector -fPIC -mno-red-zone -nostdinc -Iinclude
+
 LD = ld
 LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments
 
@@ -22,7 +25,7 @@ USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_u
                 rootfs/bin/httpd rootfs/bin/tcc rootfs/bin/cc rootfs/bin/elfhello \
                 rootfs/bin/dltest rootfs/lib/libmath.so rootfs/bin/lspci rootfs/bin/usbinfo
 
-all: Image rootfs.tar disk.img usbdisk.img
+all: Image rootfs.tar disk.img usbdisk.img BOOTX64.EFI liveusb.img
 
 boot/boot.o: boot/boot.S
 	$(CC) $(CFLAGS) -c boot/boot.S -o boot/boot.o
@@ -251,6 +254,32 @@ rootfs/bin/usbinfo: user/crt0.o user/usbinfo.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/usbinfo.o user/ulibc.o -o rootfs/bin/usbinfo
 
+tools/mkefi: tools/mkefi.c
+	gcc -O2 tools/mkefi.c -o tools/mkefi
+
+tools/mkesp: tools/mkesp.c
+	gcc -O2 tools/mkesp.c -o tools/mkesp
+
+boot/uefi.o: boot/uefi.c include/uefi.h
+	$(CC) $(UEFI_CFLAGS) -c boot/uefi.c -o boot/uefi.o
+
+boot/uefi_jump.o: boot/uefi_jump.S
+	$(CC) $(UEFI_CFLAGS) -c boot/uefi_jump.S -o boot/uefi_jump.o
+
+BOOTX64.EFI: tools/mkefi boot/uefi.o boot/uefi_jump.o
+	$(LD) -n -e efi_main -Ttext 0x1000 --oformat binary boot/uefi.o boot/uefi_jump.o -o boot/uefi.bin
+	./tools/mkefi boot/uefi.bin BOOTX64.EFI
+
+liveusb.img: BOOTX64.EFI Image rootfs.tar
+	@rm -f liveusb.img
+	@qemu-img create -f raw liveusb.img 64M >/dev/null 2>&1 || dd if=/dev/zero of=liveusb.img bs=1M count=64 status=none
+	@mkfs.vfat -F 32 -n "LINUX_EFI" liveusb.img >/dev/null
+	@mmd -i liveusb.img ::/EFI ::/EFI/BOOT
+	@mcopy -i liveusb.img BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+	@mcopy -i liveusb.img Image ::/Image
+	@mcopy -i liveusb.img rootfs.tar ::/rootfs.tar
+	@echo "[OK] liveusb.img generated with complete EFI/BOOT/BOOTX64.EFI structure"
+
 disk.img:
 	@if [ ! -f disk.img ]; then \
 		qemu-img create -f raw disk.img 32M 2>/dev/null || dd if=/dev/zero of=disk.img bs=1M count=32 2>/dev/null; \
@@ -311,5 +340,12 @@ run-tap: Image rootfs.tar disk.img usbdisk.img
 	-netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
 	-device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
 
+run-uefi: Image rootfs.tar disk.img usbdisk.img liveusb.img
+	qemu-system-x86_64 -bios /usr/share/edk2/x64/OVMF.4m.fd -smp 2 -m 128M \
+	-drive file=disk.img,format=raw,index=0,media=disk \
+	-device qemu-xhci,id=xhci -drive file=liveusb.img,format=raw,if=none,id=uefiboot -device usb-storage,bus=xhci.0,drive=uefiboot \
+	-netdev user,id=net0,hostfwd=tcp::8080-:80 \
+	-device e1000,netdev=net0,mac=52:54:00:12:34:56 -serial mon:stdio
+
 clean:
-	rm -rf $(OBJS) Image rootfs.tar rootfs user/*.o disk.img usbdisk.img
+	rm -rf $(OBJS) Image rootfs.tar rootfs user/*.o disk.img usbdisk.img BOOTX64.EFI liveusb.img tools/mkefi tools/mkesp boot/uefi*.o boot/uefi.bin

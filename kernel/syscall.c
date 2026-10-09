@@ -11,6 +11,7 @@
 #include <linux/tcp.h>
 #include <linux/elf.h>
 
+#define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
 #define MSR_LSTAR  0xC0000082
 #define MSR_SFMASK 0xC0000084
@@ -26,8 +27,20 @@ static inline void wrmsr(uint32_t msr, uint64_t val)
     __asm__ volatile ("wrmsr" : : "c"(msr), "a"(low), "d"(high));
 }
 
+static inline uint64_t rdmsr(uint32_t msr)
+{
+    uint32_t low, high;
+    __asm__ volatile ("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
+    return ((uint64_t)high << 32) | low;
+}
+
 void syscall_init(void)
 {
+    /* Активируем бит SCE (System Call Extension, бит 0) в регистре EFER */
+    uint64_t efer = rdmsr(MSR_EFER);
+    efer |= 1ULL;
+    wrmsr(MSR_EFER, efer);
+
     uint64_t star = ((uint64_t)0x0010 << 48) | ((uint64_t)0x0008 << 32);
     wrmsr(MSR_STAR, star);
     wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);

@@ -12,6 +12,11 @@
 .long MULTIBOOT_FLAGS
 .long MULTIBOOT_CHECKSUM
 
+.align 8
+.globl uefi_entry_ptr
+uefi_entry_ptr:
+    .quad uefi_entry
+
 .section .data
 .align 8
 mb_magic_val:
@@ -104,6 +109,73 @@ set_pd_entries:
     /* 6. Загружаем временную GDT и прыгаем в 64-битный режим */
     lgdt gdt64_desc
     ljmp $0x08, $long_mode_entry
+
+.code64
+.globl uefi_entry
+uefi_entry:
+    cli
+    cld
+    /* 1. Инициализируем ядерный стек */
+    leaq stack_top(%rip), %rsp
+
+    /* 2. Сохраняем переданные параметры magic (%rdi) и mbi (%rsi) */
+    movq %rdi, mb_magic_val(%rip)
+    movq %rsi, mb_info_val(%rip)
+
+    /* Включаем EFER.SCE (бит 0) и EFER.LME (бит 8) для аппаратного syscall */
+    movl $0xC0000080, %ecx
+    rdmsr
+    orl  $((1 << 8) | (1 << 0)), %eax
+    wrmsr
+
+    /* 3. Настройка таблиц страниц ядра (1 ГБ identity map) на чистом x86_64 */
+    leaq pdpt_table(%rip), %rax
+    orq  $0x7, %rax
+    movq %rax, pml4_table(%rip)
+
+    leaq pd_table(%rip), %rax
+    orq  $0x7, %rax
+    movq %rax, pdpt_table(%rip)
+
+    xorq %rcx, %rcx
+1:
+    movq %rcx, %rax
+    shlq $21, %rax              /* 2MB huge pages */
+    orq  $0x87, %rax            /* Present | Writable | PageSize(2MB) */
+    leaq pd_table(%rip), %rdx
+    movq %rax, (%rdx, %rcx, 8)
+    incq %rcx
+    cmpq $512, %rcx
+    jne  1b
+
+    /* 4. Загружаем CR3 ядра */
+    leaq pml4_table(%rip), %rax
+    movq %rax, %cr3
+
+    /* 5. Загружаем 64-битную GDT ядра */
+    lgdt gdt64_desc(%rip)
+
+    /* 6. Переключаем CS на ядерный селектор 0x08 через 64-битный far return */
+    pushq $0x08
+    leaq 2f(%rip), %rax
+    pushq %rax
+    lretq
+
+2:
+    /* 7. Загружаем сегменты данных ядра (0x10) */
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
+    movw %ax, %ss
+
+    /* 8. Передаем аргументы и вызываем функцию main ядра */
+    movq mb_magic_val(%rip), %rdi
+    movq mb_info_val(%rip),  %rsi
+    call main
+3:  hlt
+    jmp 3b
 
 .code64
 long_mode_entry:

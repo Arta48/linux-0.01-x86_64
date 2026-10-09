@@ -8,6 +8,11 @@ rootfs/
 rootfs.tar
 disk.img
 usbdisk.img
+BOOTX64.EFI
+liveusb.img
+tools/mkefi
+tools/mkesp
+boot/uefi.bin
 
 # Временные файлы редакторов
 *~

@@ -82,7 +82,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 
 ### Требования (Arch Linux)
 ```bash
-sudo pacman -S --needed base-devel qemu-system-x86
+sudo pacman -S --needed base-devel qemu-system-x86 qemu-img mtools dosfstools edk2-ovmf
 ```
 
 ### Сборка и запуск
@@ -92,3 +92,11 @@ sudo pacman -S --needed base-devel qemu-system-x86
 ```
 
 *(Для выхода из эмулятора нажмите **`Ctrl+A` затем `X`** или введите `exit` в шелле).*
+
+### Сборка загрузочной флешки (LiveUSB / UEFI / Ventoy)
+Для запуска на реальном ПК (например, AMD Ryzen 5 3600) или загрузки через Ventoy:
+```bash
+make liveusb.img
+# Запись напрямую на физическую флешку:
+sudo dd if=liveusb.img of=/dev/sdX bs=4M status=progress conv=fsync
+```
