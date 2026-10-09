@@ -157,6 +157,18 @@ void isr_handler(struct trap_frame *tf)
         }
     }
 
+    /* Исключение в пользовательском коде (Ring 3) не должно убивать всю ОС:
+     * завершаем только виновный процесс (как SIGSEGV = 11). */
+    if (tf->int_no < 20 && (tf->cs & 3) == 3 && current && current->pid > 1) {
+        uint64_t cr2 = 0;
+        if (tf->int_no == 14) __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+        printk("\n[Process %d killed: %s at RIP %p, addr %p]\n",
+               (int)current->pid, exceptions[tf->int_no], tf->rip, cr2);
+        __asm__ volatile ("sti");
+        sys_exit(128 + 11);
+        return;
+    }
+
     __asm__ volatile ("cli");
 
     if (tf->int_no < 20) {

@@ -11,8 +11,10 @@
 #define PTE_USER      (1ULL << 2)
 
 #define HIGH_MEMORY   (128ULL * 1024 * 1024)
+/* Максимум, который покрывает identity-map ядра (1 ГБ) */
+#define HIGH_MEMORY_MAX (1024ULL * 1024 * 1024)
 
-void mem_init(uint64_t reserve_end);
+void mem_init(uint64_t reserve_end, uint64_t limit);
 uint64_t get_free_page(void);
 uint64_t get_free_pages(uint32_t count);
 void free_page(uint64_t addr);

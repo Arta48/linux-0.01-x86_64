@@ -1550,7 +1550,7 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            if (c == '\b') {
+            if (c == '\b' || c == 127) {
                 if (buf_len > 0) {
                     buf_len--;
                     write(1, "\b", 1);

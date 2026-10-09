@@ -31,7 +31,7 @@ struct cpu_info {
 extern struct cpu_info cpus[MAX_CPUS];
 extern volatile int smp_num_cpus;
 
-void smp_init(void);
+void smp_init(int bsp_only);
 void lapic_init(void);
 uint32_t smp_get_cpu_id(void);
 void ap_startup(void);

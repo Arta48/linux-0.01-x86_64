@@ -1,223 +1,191 @@
 #include <linux/tty.h>
+#include <linux/multiboot.h>
+#include <linux/mm.h>
+#include <linux/string.h>
 #include <asm/io.h>
 #include <stdarg.h>
 
-#define VGA_BUFFER 0xB8000
-#define VGA_WIDTH  80
-#define VGA_HEIGHT 25
-#define COM1       0x3F8
+extern struct mb_info mbi;
 
-static unsigned short *vga = (unsigned short *)VGA_BUFFER;
+static uint32_t *fb = NULL;
+static uint32_t fb_width = 0;
+static uint32_t fb_height = 0;
+static uint32_t fb_pitch = 0;
+
 static int cursor_x = 0;
 static int cursor_y = 0;
-static unsigned char current_attr = 0x07; /* Серый на черном */
+static uint32_t current_fg = 0x00FF66; /* Хакерский зеленый, как в tty */
+static uint32_t current_bg = 0x000000; /* Черный фон */
 
-/* Состояния парсера ANSI: 0 - текст, 1 - ESC, 2 - CSI '[' */
-static int ansi_state = 0;
-#define MAX_ANSI_PAR 4
-static int ansi_par[MAX_ANSI_PAR];
-static int ansi_par_idx = 0;
+/* Минималистичный системный шрифт 8x8 (ASCII 32-127) */
+static const uint8_t font8x8[96][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},
+    {0x66,0x66,0x66,0x00,0x00,0x00,0x00,0x00}, {0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0x00},
+    {0x18,0x7E,0x60,0x3C,0x06,0x7E,0x18,0x00}, {0x00,0xC6,0xCC,0x18,0x30,0x66,0xC6,0x00},
+    {0x38,0x6C,0x68,0x76,0xDC,0xCC,0x76,0x00}, {0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00},
+    {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}, {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00},
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00},
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00},
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, {0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0x00},
+    {0x3C,0x66,0x6E,0x7E,0x76,0x66,0x3C,0x00}, {0x18,0x38,0x58,0x18,0x18,0x18,0x7E,0x00},
+    {0x3C,0x66,0x06,0x0C,0x18,0x30,0x7E,0x00}, {0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00},
+    {0x0C,0x1C,0x3C,0x6C,0xCC,0xFE,0x0C,0x00}, {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00},
+    {0x3C,0x66,0x60,0x7C,0x66,0x66,0x3C,0x00}, {0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x00},
+    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00}, {0x3C,0x66,0x66,0x3E,0x06,0x66,0x3C,0x00},
+    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}, {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30},
+    {0x0C,0x18,0x30,0x60,0x30,0x18,0x0C,0x00}, {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00},
+    {0x30,0x18,0x0C,0x06,0x0C,0x18,0x30,0x00}, {0x3C,0x66,0x0C,0x18,0x18,0x00,0x18,0x00},
+    {0x3C,0x66,0x6E,0x6E,0x60,0x66,0x3C,0x00}, {0x3C,0x66,0x66,0x7E,0x66,0x66,0x66,0x00},
+    {0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00}, {0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00},
+    {0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00}, {0x7E,0x60,0x60,0x78,0x60,0x60,0x7E,0x00},
+    {0x7E,0x60,0x60,0x78,0x60,0x60,0x60,0x00}, {0x3C,0x66,0x60,0x6E,0x66,0x66,0x3E,0x00},
+    {0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00}, {0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00},
+    {0x1E,0x0C,0x0C,0x0C,0x0C,0x6C,0x38,0x00}, {0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00},
+    {0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00}, {0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00},
+    {0x66,0x76,0x7E,0x7E,0x6E,0x66,0x66,0x00}, {0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00},
+    {0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00}, {0x3C,0x66,0x66,0x66,0x6A,0x6C,0x36,0x00},
+    {0x7C,0x66,0x66,0x7C,0x6C,0x66,0x66,0x00}, {0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00},
+    {0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, {0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00},
+    {0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00}, {0x63,0x63,0x6B,0x7F,0x77,0x63,0x63,0x00},
+    {0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00}, {0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x00},
+    {0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00}, {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00},
+    {0x80,0xC0,0x60,0x30,0x18,0x0C,0x06,0x00}, {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00},
+    {0x18,0x3C,0x66,0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00},
+    {0x30,0x18,0x00,0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x3C,0x06,0x3E,0x66,0x3E,0x00},
+    {0x60,0x60,0x7C,0x66,0x66,0x66,0x7C,0x00}, {0x00,0x00,0x3C,0x60,0x60,0x66,0x3C,0x00},
+    {0x06,0x06,0x3E,0x66,0x66,0x66,0x3E,0x00}, {0x00,0x00,0x3C,0x66,0x7E,0x60,0x3C,0x00},
+    {0x1C,0x30,0x7C,0x30,0x30,0x30,0x30,0x00}, {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x3C},
+    {0x60,0x60,0x7C,0x66,0x66,0x66,0x66,0x00}, {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00},
+    {0x0C,0x00,0x1C,0x0C,0x0C,0x0C,0x0C,0x38}, {0x60,0x60,0x66,0x6C,0x78,0x6C,0x66,0x00},
+    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, {0x00,0x00,0x66,0x7F,0x7F,0x6B,0x63,0x00},
+    {0x00,0x00,0x7C,0x66,0x66,0x66,0x66,0x00}, {0x00,0x00,0x3C,0x66,0x66,0x66,0x3C,0x00},
+    {0x00,0x00,0x7C,0x66,0x66,0x7C,0x60,0x60}, {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x06},
+    {0x00,0x00,0x7C,0x66,0x60,0x60,0x60,0x00}, {0x00,0x00,0x3E,0x60,0x3C,0x06,0x7C,0x00},
+    {0x30,0x30,0x7C,0x30,0x30,0x34,0x18,0x00}, {0x00,0x00,0x66,0x66,0x66,0x66,0x3E,0x00},
+    {0x00,0x00,0x66,0x66,0x66,0x3C,0x18,0x00}, {0x00,0x00,0x63,0x6B,0x7F,0x77,0x63,0x00},
+    {0x00,0x00,0x66,0x3C,0x18,0x3C,0x66,0x00}, {0x00,0x00,0x66,0x66,0x66,0x3E,0x06,0x3C},
+    {0x00,0x00,0x7E,0x0C,0x18,0x30,0x7E,0x00}, {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00},
+    {0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18}, {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00},
+    {0x3B,0x6E,0x00,0x00,0x00,0x00,0x00,0x00}
+};
 
-static void serial_init(void)
+static void draw_char(char c, int cx, int cy, uint32_t fg, uint32_t bg)
 {
-    outb(0x00, COM1 + 1);
-    outb(0x80, COM1 + 3);
-    outb(0x03, COM1 + 0);
-    outb(0x00, COM1 + 1);
-    outb(0x03, COM1 + 3);
-    outb(0xC7, COM1 + 2);
-    outb(0x0B, COM1 + 4);
+    if (!fb) return;
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = font8x8[c - 32];
+
+    for (int y = 0; y < 8; y++) {
+        uint32_t *pixel_row = fb + ((cy * 8 + y) * (fb_pitch / 4)) + (cx * 8);
+        uint8_t row_data = glyph[y];
+        for (int x = 0; x < 8; x++) {
+            pixel_row[x] = (row_data & (0x80 >> x)) ? fg : bg;
+        }
+    }
 }
 
-static void serial_putc(char c)
+static void fb_scroll(void)
 {
-    while ((inb(COM1 + 5) & 0x20) == 0);
-    outb(c, COM1);
+    if (!fb) return;
+    uint32_t row_size = fb_pitch / 4;
+    uint32_t lines_to_move = fb_height - 8;
+
+    /* Сдвигаем все пиксели вверх на 8 пикселей (1 строка текста) */
+    memmove(fb, fb + (8 * row_size), lines_to_move * fb_pitch);
+
+    /* Очищаем нижнюю строку */
+    uint32_t *bottom_row = fb + (lines_to_move * row_size);
+    for (uint32_t i = 0; i < 8 * row_size; i++) {
+        bottom_row[i] = current_bg;
+    }
+    cursor_y--;
+}
+
+static void fb_clear(void)
+{
+    if (!fb) return;
+    uint32_t total_pixels = (fb_pitch / 4) * fb_height;
+    for (uint32_t i = 0; i < total_pixels; i++) {
+        fb[i] = current_bg;
+    }
+    cursor_x = 0;
+    cursor_y = 0;
 }
 
 void console_init(void)
 {
-    serial_init();
-    current_attr = 0x07;
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        vga[i] = (current_attr << 8) | ' ';
+    /* Инициализация фреймбуфера из параметров UEFI */
+    if ((mbi.flags & MB_FLAG_FB) && mbi.framebuffer_addr != 0 &&
+        mbi.framebuffer_width != 0 && mbi.framebuffer_height != 0 &&
+        mbi.framebuffer_bpp == 32) {
+        fb_width = mbi.framebuffer_width;
+        fb_height = mbi.framebuffer_height;
+        fb_pitch = mbi.framebuffer_pitch;
+
+        /* Проецируем физическую видеопамять в ядро */
+        uint64_t fb_phys = mbi.framebuffer_addr;
+        uint64_t fb_size = fb_height * fb_pitch;
+        uint64_t pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        for (uint64_t p = 0; p < pages; p++) {
+            map_page(NULL, fb_phys + (p * PAGE_SIZE), fb_phys + (p * PAGE_SIZE), PTE_WRITABLE);
+        }
+        fb = (uint32_t *)fb_phys;
+        fb_clear();
     }
-    cursor_x = 0;
-    cursor_y = 0;
-    ansi_state = 0;
 }
 
-static void clamp_cursor(void)
+/* COM1 с ограниченным ожиданием: на реальном ПК UART может отсутствовать
+ * (порт читается как 0x00/0xFF) -- бесконечный цикл вешал систему. */
+static void serial_out(char c)
 {
-    if (cursor_x < 0) cursor_x = 0;
-    if (cursor_x >= VGA_WIDTH) cursor_x = VGA_WIDTH - 1;
-    if (cursor_y < 0) cursor_y = 0;
-    if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1;
-}
-
-static void scroll(void)
-{
-    for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
-        vga[i] = vga[i + VGA_WIDTH];
-    }
-    for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
-        vga[i] = (current_attr << 8) | ' ';
-    }
-    cursor_y = VGA_HEIGHT - 1;
-}
-
-static void vga_clear_screen(void)
-{
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        vga[i] = (current_attr << 8) | ' ';
-    }
-    cursor_x = 0;
-    cursor_y = 0;
-}
-
-static void vga_clear_line_end(void)
-{
-    for (int x = cursor_x; x < VGA_WIDTH; x++) {
-        vga[cursor_y * VGA_WIDTH + x] = (current_attr << 8) | ' ';
+    for (int t = 0; t < 20000; t++) {
+        uint8_t st = inb(0x3F8 + 5);
+        if (st == 0xFF) return;          /* нет UART */
+        if (st & 0x20) { outb(c, 0x3F8); return; }
     }
 }
 
 void console_putc(char c)
 {
-    /* Правильное затирание символа при Backspace */
-    if (c == '\b') {
-        if (cursor_x > 0) {
+    if (c == '\b' || c == 127) {
+        /* В терминале QEMU (COM1): возврат влево, пробел, возврат влево */
+        serial_out('\b');
+        serial_out(' ');
+        serial_out('\b');
+
+        /* На экране (Framebuffer) */
+        if (fb && cursor_x > 0) {
             cursor_x--;
-            vga[cursor_y * VGA_WIDTH + cursor_x] = (current_attr << 8) | ' ';
+            draw_char(' ', cursor_x, cursor_y, current_fg, current_bg);
         }
-        /* В терминале: возврат влево, затирание пробелом, повторный возврат влево */
-        serial_putc('\b');
-        serial_putc(' ');
-        serial_putc('\b');
         return;
     }
 
-    /* Передаем символ в COM1 для терминала */
-    serial_putc(c);
+    /* Пишем в COM1 */
+    serial_out(c);
 
-    /* Конечный автомат парсера ANSI для VGA */
-    if (ansi_state == 0) {
-        if (c == '\033') {
-            ansi_state = 1;
-            return;
-        }
+    if (!fb) return; /* Если фреймбуфера нет (BIOS режим), ничего не рисуем на экран */
 
-        if (c == '\f' || c == 12) {
-            vga_clear_screen();
-            return;
-        }
+        int max_cols = fb_width / 8;
+    int max_rows = fb_height / 8;
 
-        if (c == '\n') {
+    if (c == '\n') {
+        cursor_x = 0;
+        cursor_y++;
+    } else if (c == '\r') {
+        cursor_x = 0;
+    } else if ((unsigned char)c >= 32) {
+        draw_char(c, cursor_x, cursor_y, current_fg, current_bg);
+        cursor_x++;
+        if (cursor_x >= max_cols) {
             cursor_x = 0;
             cursor_y++;
-        } else if (c == '\r') {
-            cursor_x = 0;
-        } else if (c == '\t') {
-            cursor_x = (cursor_x + 8) & ~7;
-            if (cursor_x >= VGA_WIDTH) {
-                cursor_x = 0;
-                cursor_y++;
-            }
-        } else if ((unsigned char)c >= 32) {
-            vga[cursor_y * VGA_WIDTH + cursor_x] = (current_attr << 8) | c;
-            cursor_x++;
-            if (cursor_x >= VGA_WIDTH) {
-                cursor_x = 0;
-                cursor_y++;
-            }
         }
-
-        if (cursor_y >= VGA_HEIGHT) {
-            scroll();
-        }
-        return;
     }
 
-    if (ansi_state == 1) {
-        if (c == '[') {
-            ansi_state = 2;
-            ansi_par_idx = 0;
-            for (int i = 0; i < MAX_ANSI_PAR; i++) ansi_par[i] = 0;
-            return;
-        }
-        ansi_state = 0;
-        return;
-    }
-
-    if (ansi_state == 2) {
-        if (c >= '0' && c <= '9') {
-            ansi_par[ansi_par_idx] = ansi_par[ansi_par_idx] * 10 + (c - '0');
-            return;
-        }
-        if (c == ';') {
-            if (ansi_par_idx < MAX_ANSI_PAR - 1) {
-                ansi_par_idx++;
-            }
-            return;
-        }
-
-        ansi_state = 0;
-        switch (c) {
-            case 'H':
-            case 'f': {
-                int r = ansi_par[0] ? ansi_par[0] - 1 : 0;
-                int col = ansi_par[1] ? ansi_par[1] - 1 : 0;
-                cursor_y = r;
-                cursor_x = col;
-                clamp_cursor();
-                break;
-            }
-            case 'J': {
-                if (ansi_par[0] == 2 || ansi_par[0] == 0) {
-                    vga_clear_screen();
-                }
-                break;
-            }
-            case 'K': {
-                vga_clear_line_end();
-                break;
-            }
-            case 'A': {
-                int count = ansi_par[0] ? ansi_par[0] : 1;
-                cursor_y -= count;
-                clamp_cursor();
-                break;
-            }
-            case 'B': {
-                int count = ansi_par[0] ? ansi_par[0] : 1;
-                cursor_y += count;
-                clamp_cursor();
-                break;
-            }
-            case 'C': {
-                int count = ansi_par[0] ? ansi_par[0] : 1;
-                cursor_x += count;
-                clamp_cursor();
-                break;
-            }
-            case 'D': {
-                int count = ansi_par[0] ? ansi_par[0] : 1;
-                cursor_x -= count;
-                clamp_cursor();
-                break;
-            }
-            case 'm': {
-                for (int i = 0; i <= ansi_par_idx; i++) {
-                    int p = ansi_par[i];
-                    if (p == 0) current_attr = 0x07;
-                    else if (p == 1) current_attr = 0x0F;
-                    else if (p == 7) current_attr = 0x70;
-                }
-                break;
-            }
-            default:
-                break;
-        }
+    if (cursor_y >= max_rows) {
+        fb_scroll();
     }
 }
 
@@ -226,48 +194,20 @@ static void print_num(unsigned long n, int base)
     char buf[65];
     static const char digits[] = "0123456789ABCDEF";
     int i = 0;
-
-    if (n == 0) {
-        console_putc('0');
-        return;
-    }
-    while (n > 0) {
-        buf[i++] = digits[n % base];
-        n /= base;
-    }
-    while (--i >= 0) {
-        console_putc(buf[i]);
-    }
+    if (n == 0) { console_putc('0'); return; }
+    while (n > 0) { buf[i++] = digits[n % base]; n /= base; }
+    while (--i >= 0) console_putc(buf[i]);
 }
 
 void printk(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-
     for (const char *p = fmt; *p != '\0'; p++) {
-        if (*p != '%') {
-            console_putc(*p);
-            continue;
-        }
+        if (*p != '%') { console_putc(*p); continue; }
         p++;
-        int width = 0;
-        char pad = ' ';
-        if (*p == '0') {
-            pad = '0';
-            p++;
-        }
-        while (*p >= '0' && *p <= '9') {
-            width = width * 10 + (*p - '0');
-            p++;
-        }
-
         switch (*p) {
-            case 'c': {
-                char c = (char)va_arg(args, int);
-                console_putc(c);
-                break;
-            }
+            case 'c': console_putc((char)va_arg(args, int)); break;
             case 's': {
                 const char *s = va_arg(args, const char *);
                 if (!s) s = "(null)";
@@ -276,44 +216,14 @@ void printk(const char *fmt, ...)
             }
             case 'd': {
                 long d = va_arg(args, long);
-                if (d < 0) {
-                    console_putc('-');
-                    d = -d;
-                }
+                if (d < 0) { console_putc('-'); d = -d; }
                 print_num(d, 10);
                 break;
             }
-            case 'x': {
-                unsigned long val = va_arg(args, unsigned long);
-                char hbuf[17];
-                int hi = 0;
-                static const char hex_chars[] = "0123456789abcdef";
-                if (val == 0) hbuf[hi++] = '0';
-                else {
-                    while (val > 0) {
-                        hbuf[hi++] = hex_chars[val & 0x0F];
-                        val >>= 4;
-                    }
-                }
-                while (hi < width) {
-                    console_putc(pad);
-                    width--;
-                }
-                while (--hi >= 0) console_putc(hbuf[hi]);
-                break;
-            }
-            case 'p': {
-                console_putc('0');
-                console_putc('x');
-                print_num(va_arg(args, unsigned long), 16);
-                break;
-            }
-            case '%':
-                console_putc('%');
-                break;
-            default:
-                console_putc(*p);
-                break;
+            case 'x': print_num(va_arg(args, unsigned long), 16); break;
+            case 'p': console_putc('0'); console_putc('x'); print_num(va_arg(args, unsigned long), 16); break;
+            case '%': console_putc('%'); break;
+            default: console_putc(*p); break;
         }
     }
     va_end(args);

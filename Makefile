@@ -7,7 +7,8 @@ USER_CFLAGS = -Wall -Wextra -O2 -m64 -ffreestanding -nostdinc \
               -fno-stack-protector -fno-pie -no-pie -mno-red-zone -Iuser -Iinclude
 
 UEFI_CFLAGS = -Wall -Wextra -O2 -m64 -ffreestanding -fshort-wchar \
-              -fno-stack-protector -fPIC -mno-red-zone -nostdinc -Iinclude
+              -fno-stack-protector -fPIC -mno-red-zone -nostdinc -Iinclude \
+              -fcf-protection=none -fno-asynchronous-unwind-tables -Wa,-mx86-used-note=no
 
 LD = ld
 LDFLAGS = -n -T boot/linker.ld -static --no-warn-rwx-segments

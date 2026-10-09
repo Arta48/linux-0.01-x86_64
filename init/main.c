@@ -15,6 +15,7 @@
 #include <linux/net.h>
 #include <linux/pci.h>
 #include <linux/xhci.h>
+#include <asm/io.h>
 
 /* Фоновый поток ядра */
 static int kthread_heartbeat(void *arg)
@@ -65,40 +66,70 @@ void user_trampoline(void)
     enter_user_mode((uint64_t)init_process, user_stack);
 }
 
+struct mb_info mbi;
+
 void main(uint64_t mb_magic, uint64_t mb_info_addr)
 {
+    /* COM1 Инициализация для ранних логов (до console_init) */
+    outb(0x00, 0x3F8 + 1); outb(0x80, 0x3F8 + 3); outb(0x03, 0x3F8 + 0);
+    outb(0x00, 0x3F8 + 1); outb(0x03, 0x3F8 + 3); outb(0xC7, 0x3F8 + 2); outb(0x0B, 0x3F8 + 4);
+
+    if (mb_magic == MULTIBOOT_BOOTLOADER_MAGIC && mb_info_addr != 0) {
+        memcpy(&mbi, (void *)mb_info_addr, sizeof(struct mb_info));
+    } else {
+        memset(&mbi, 0, sizeof(struct mb_info));
+    }
+
+    uint64_t initrd_start = 0;
+    uint64_t initrd_end = 0;
+
+    if ((mbi.flags & MB_FLAG_MODS) && mbi.mods_count > 0 && mbi.mods_addr != 0) {
+        struct mb_module *mod = (struct mb_module *)((uint64_t)mbi.mods_addr);
+        initrd_start = (uint64_t)mod->mod_start;
+        initrd_end   = (uint64_t)mod->mod_end;
+    }
+
+    /* Резервируем initrd и страницу с mb_info (её кладёт UEFI-загрузчик сразу
+     * за initrd) и берём границу памяти от загрузчика, если она проверена. */
+    uint64_t reserve_end = initrd_end;
+    uint64_t mem_limit = HIGH_MEMORY;
+    if ((mbi.flags & MB_FLAG_UEFI) && (mbi.flags & MB_FLAG_MEM)) {
+        if (mb_info_addr + PAGE_SIZE > reserve_end) {
+            reserve_end = mb_info_addr + PAGE_SIZE;
+        }
+        mem_limit = 0x100000ULL + (uint64_t)mbi.mem_upper * 1024ULL;
+    }
+
+    /* Инициализируем память ДО консоли, чтобы работал маппинг фреймбуфера! */
+    mem_init(reserve_end, mem_limit);
+
     console_init();
 
     printk("==============================================\n");
     printk("   Linux 0.01 (x86_64 Edition) Booting...    \n");
     printk("==============================================\n\n");
 
-    uint64_t initrd_start = 0;
-    uint64_t initrd_end = 0;
-
-    if (mb_magic == MULTIBOOT_BOOTLOADER_MAGIC && mb_info_addr != 0) {
-        struct mb_info *mbi = (struct mb_info *)mb_info_addr;
-        if ((mbi->flags & MB_FLAG_MODS) && mbi->mods_count > 0 && mbi->mods_addr != 0) {
-            struct mb_module *mod = (struct mb_module *)((uint64_t)mbi->mods_addr);
-            initrd_start = (uint64_t)mod->mod_start;
-            initrd_end   = (uint64_t)mod->mod_end;
-            printk("[OK] Multiboot Initrd Module: %p - %p (%d KB)\n",
-                   initrd_start, initrd_end, (int)((initrd_end - initrd_start) / 1024));
-        }
+    if (initrd_start && initrd_end) {
+        printk("[OK] Multiboot Initrd Module: %p - %p (%d KB)\n",
+                initrd_start, initrd_end, (int)((initrd_end - initrd_start) / 1024));
     }
 
     time_init();
     gdt_init();
     trap_init();
     syscall_init();
-    mem_init(initrd_end);
     sched_init();
     ide_init();
     fs_init();
     minix_init();
     pci_scan_all();
-    xhci_init();
-    smp_init();
+
+    /* Временно отключаем xHCI, чтобы BIOS продолжал эмулировать USB-клавиатуру как PS/2 */
+    // xhci_init();
+
+    /* На реальном железе (UEFI) пока работаем на одном ядре: все AP стартовали
+     * бы на одном общем стеке, а трамплин 0x8000 занят прошивкой. */
+    smp_init((mbi.flags & MB_FLAG_UEFI) ? 1 : 0);
     net_init();
     strcpy(current->name, "idle");
 

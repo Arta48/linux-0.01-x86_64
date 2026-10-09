@@ -8,6 +8,9 @@ static struct buffer_head bh_pool[NR_BUFFERS];
 static struct buffer_head *hash_table[NR_HASH];
 static struct buffer_head *free_list = NULL;
 
+/* Раньше dev 0 (первый диск) считался "свободным буфером": его блоки не
+ * сбрасывались на диск и не удалялись из хеша. */
+#define BH_FREE_DEV 0xFFFF
 #define HASH_FN(dev, block) (((uint32_t)(dev) ^ (uint32_t)(block)) % NR_HASH)
 
 void buffer_init(void)
@@ -26,7 +29,7 @@ void buffer_init(void)
     for (int i = 0; i < NR_BUFFERS; i++) {
         struct buffer_head *bh = &bh_pool[i];
         bh->b_data = (char *)(data_mem + (uint64_t)i * BLOCK_SIZE);
-        bh->b_dev = 0;
+        bh->b_dev = BH_FREE_DEV;
         bh->b_blocknr = 0;
         bh->b_uptodate = 0;
         bh->b_dirt = 0;
@@ -107,11 +110,11 @@ struct buffer_head *getblk(uint16_t dev, uint32_t block)
         return NULL;
     }
 
-    if (victim->b_dirt && victim->b_dev != 0) {
+    if (victim->b_dirt && victim->b_dev != BH_FREE_DEV) {
         bwrite(victim);
     }
 
-    if (victim->b_dev != 0) {
+    if (victim->b_dev != BH_FREE_DEV) {
         remove_from_hash(victim);
     }
 
@@ -182,7 +185,7 @@ void bflush(void)
 {
     for (int i = 0; i < NR_BUFFERS; i++) {
         struct buffer_head *bh = &bh_pool[i];
-        if (bh->b_dirt && bh->b_dev != 0) {
+        if (bh->b_dirt && bh->b_dev != BH_FREE_DEV) {
             bwrite(bh);
         }
     }

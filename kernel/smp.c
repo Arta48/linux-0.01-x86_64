@@ -89,10 +89,10 @@ void ap_startup(void)
     }
 }
 
-void smp_init(void)
+void smp_init(int bsp_only)
 {
     /* Проецируем страницу Local APIC (0xFEE00000) */
-    map_page(NULL, LAPIC_DEFAULT_BASE, LAPIC_DEFAULT_BASE, PTE_WRITABLE);
+    map_page(NULL, LAPIC_DEFAULT_BASE, LAPIC_DEFAULT_BASE, PTE_WRITABLE | (3ULL << 3)); /* PWT|PCD: MMIO */
 
     for (int i = 0; i < MAX_CPUS; i++) {
         cpus[i].id = i;
@@ -108,6 +108,11 @@ void smp_init(void)
     smp_num_cpus = 1;
 
     printk("[OK] SMP: Bootstrap Processor (Core %d) initialized\n", (int)bsp_id);
+
+    if (bsp_only) {
+        printk("[OK] SMP: single-core mode (AP startup disabled on UEFI boot)\n");
+        return;
+    }
 
     /* Копируем трамплин в физическую память по адресу 0x8000 */
     uint64_t trampoline_size = (uint64_t)(trampoline_end - trampoline_start);

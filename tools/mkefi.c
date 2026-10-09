@@ -17,7 +17,7 @@ int main(int argc, char **argv)
     fseek(fin, 0, SEEK_SET);
 
     uint8_t *code = malloc(code_size);
-    fread(code, 1, code_size, fin);
+    if (fread(code, 1, code_size, fin) != (size_t)code_size) { perror("fread"); return 1; }
     fclose(fin);
 
     FILE *fout = fopen(argv[2], "wb");
@@ -51,7 +51,8 @@ int main(int argc, char **argv)
     *(uint8_t  *)(opt + 2) = 0x02;   /* MajorLinkerVersion */
     *(uint8_t  *)(opt + 3) = 0x1E;   /* MinorLinkerVersion */
     uint32_t code_aligned_file = (uint32_t)((code_size + 511) & ~511);
-    uint32_t code_aligned_mem  = (uint32_t)((code_size + 4095) & ~4095);
+    /* +4 КБ запаса: .bss (NOBITS) в плоском бинарнике отсутствует, но лежит сразу за ним */
+    uint32_t code_aligned_mem  = (uint32_t)((code_size + 4096 + 4095) & ~4095);
     uint32_t reloc_rva         = 0x1000 + code_aligned_mem;
     *(uint32_t *)(opt + 4) = code_aligned_file; /* SizeOfCode */
     *(uint32_t *)(opt + 8) = 512;               /* SizeOfInitializedData */
@@ -72,11 +73,11 @@ int main(int argc, char **argv)
     /* Section Header: .text */
     uint8_t *sec = opt + 0xF0;
     memcpy(sec, ".text\0\0\0", 8);
-    *(uint32_t *)(sec + 8)  = (uint32_t)code_size; /* VirtualSize */
+    *(uint32_t *)(sec + 8)  = code_aligned_mem; /* VirtualSize (с запасом под .bss) */
     *(uint32_t *)(sec + 12) = 0x1000; /* VirtualAddress */
     *(uint32_t *)(sec + 16) = code_aligned_file;   /* SizeOfRawData */
     *(uint32_t *)(sec + 20) = 0x200; /* PointerToRawData */
-    *(uint32_t *)(sec + 36) = 0x60000020; /* Characteristics: Code, Executable, Read */
+    *(uint32_t *)(sec + 36) = 0xE0000060; /* Code | InitData | Execute | Read | Write (.data/.bss пишутся) */
 
     /* Section Header: .reloc */
     uint8_t *sec_rel = sec + 40;

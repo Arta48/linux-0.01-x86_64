@@ -10,6 +10,7 @@ extern char _end[];
 extern char pd_table[];
 
 static uint64_t low_mem = 0;
+static uint64_t high_mem = HIGH_MEMORY;
 static uint32_t paging_pages = 0;
 
 #define MAX_PAGING_PAGES 32768
@@ -27,25 +28,39 @@ static inline uint64_t *get_current_pml4(void)
     return (uint64_t *)(cr3 & ~0xFFFULL);
 }
 
-void mem_init(uint64_t reserve_end)
+void mem_init(uint64_t reserve_end, uint64_t limit)
 {
     uint64_t base = (uint64_t)_end;
     if (reserve_end > base) {
         base = reserve_end;
     }
 
+    /* Граница не может превышать identity-map (1 ГБ) и размер mem_map */
+    if (limit == 0 || limit > HIGH_MEMORY_MAX) {
+        limit = HIGH_MEMORY_MAX;
+    }
+
     low_mem = PAGE_ALIGN(base);
-    paging_pages = (HIGH_MEMORY - low_mem) / PAGE_SIZE;
+    if (low_mem >= limit) {
+        /* Раньше здесь происходил unsigned underflow -> адреса за пределами
+         * identity-map -> #PF без IDT -> triple fault (перезагрузка ПК). */
+        paging_pages = 0;
+        high_mem = low_mem;
+        printk("[PANIC] mem_init: low_mem %p >= limit %p, no free memory!\n", low_mem, limit);
+        return;
+    }
+    paging_pages = (uint32_t)((limit - low_mem) / PAGE_SIZE);
 
     if (paging_pages > MAX_PAGING_PAGES) {
         paging_pages = MAX_PAGING_PAGES;
     }
+    high_mem = low_mem + (uint64_t)paging_pages * PAGE_SIZE;
 
     for (uint32_t i = 0; i < paging_pages; i++) {
         mem_map[i] = 0;
     }
 
-    printk("[OK] Memory Manager: low_mem = %p, high_mem = %p\n", low_mem, HIGH_MEMORY);
+    printk("[OK] Memory Manager: low_mem = %p, high_mem = %p\n", low_mem, high_mem);
     printk("[OK] Free Physical Pages: %d (%d MB free for allocation)\n",
            paging_pages, (paging_pages * PAGE_SIZE) / (1024 * 1024));
 }
@@ -75,6 +90,10 @@ uint64_t get_free_pages(uint32_t count)
 {
     if (count == 0) return 0;
     if (count == 1) return get_free_page();
+    if (count > paging_pages) {
+        printk("[PANIC] Out of contiguous memory for %d pages!\n", count);
+        return 0;
+    }
 
     for (uint32_t i = 0; i <= paging_pages - count; i++) {
         int found = 1;
@@ -100,7 +119,7 @@ uint64_t get_free_pages(uint32_t count)
 
 void free_page(uint64_t addr)
 {
-    if (addr < low_mem || addr >= HIGH_MEMORY) {
+    if (addr < low_mem || addr >= high_mem) {
         return;
     }
 
@@ -230,7 +249,7 @@ uint64_t copy_process_pml4(uint64_t parent_pml4)
                 invlpg(virt);
 
                 /* Увеличиваем счетчик ссылок на физическую страницу в mem_map */
-                if (parent_phys >= low_mem && parent_phys < HIGH_MEMORY) {
+                if (parent_phys >= low_mem && parent_phys < high_mem) {
                     uint32_t idx = (parent_phys - low_mem) / PAGE_SIZE;
                     mem_map[idx]++;
                 }
@@ -292,7 +311,7 @@ uint32_t get_total_pages_count(void)
 int do_wp_page(uint64_t *pte, uint64_t addr)
 {
     uint64_t old_page = *pte & ~0xFFFULL;
-    uint32_t idx = (old_page >= low_mem && old_page < HIGH_MEMORY) ? (old_page - low_mem) / PAGE_SIZE : 0;
+    uint32_t idx = (old_page >= low_mem && old_page < high_mem) ? (old_page - low_mem) / PAGE_SIZE : 0;
 
     /* Если страницу больше никто не делит — просто возвращаем права на запись */
     if (mem_map[idx] <= 1) {

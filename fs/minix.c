@@ -434,8 +434,17 @@ int minix_mount(uint8_t dev)
     brelse(bh);
 
     if (sb.s_magic != MINIX_SUPER_MAGIC) {
-        printk("[MINIX] Superblock magic mismatch (0x%x != 0x%x). Initializing filesystem...\n",
-               sb.s_magic, MINIX_SUPER_MAGIC);
+        /* Автоформатирование уничтожало данные на реальном диске. Форматируем
+         * только если весь суперблок и первые блоки состоят из нулей (чистый диск). */
+        int blank = 1;
+        for (uint32_t i = 0; i < sizeof(sb); i++) {
+            if (((uint8_t *)&sb)[i]) { blank = 0; break; }
+        }
+        if (!blank) {
+            printk("[MINIX] Not a Minix v1 disk (magic 0x%x) - refusing to format, /mnt disabled\n", sb.s_magic);
+            return -1;
+        }
+        printk("[MINIX] Blank disk. Initializing filesystem...\n");
         minix_format(dev, 32768, 1024);
 
         bh = bread(dev, 1);
