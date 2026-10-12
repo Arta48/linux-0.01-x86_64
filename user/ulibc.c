@@ -34,6 +34,7 @@
 #define __NR_listen  50
 #define __NR_recvfrom 51
 #define __NR_uname   59
+#define __NR_reboot  88
 #define __NR_dup2    63
 #define __NR_getcwd  79
 
@@ -107,6 +108,7 @@ int kill(int pid, int sig) { return (int)syscall2(__NR_kill, pid, sig); }
 int signal(int sig, void (*handler)(int)) { return (int)syscall2(__NR_signal, sig, (uint64_t)handler); }
 int uname(struct utsname *name) { return (int)syscall1(__NR_uname, (uint64_t)name); }
 int sync(void) { return (int)syscall0(__NR_sync); }
+int reboot(int cmd) { return (int)syscall1(__NR_reboot, (uint64_t)cmd); }
 int socket(int domain, int type, int protocol) { return (int)syscall3(__NR_socket, domain, type, protocol); }
 int bind(int sockfd, uint16_t port) { return (int)syscall2(__NR_bind, sockfd, port); }
 int listen(int sockfd, int backlog) { return (int)syscall2(__NR_listen, sockfd, backlog); }

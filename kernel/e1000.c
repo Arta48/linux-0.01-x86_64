@@ -34,7 +34,7 @@ int e1000_init(void)
 {
     struct pci_device dev;
     if (pci_find_device(PCI_VENDOR_INTEL, PCI_DEVICE_E1000, &dev) < 0) {
-        printk("[WARN] Intel e1000 NIC not found on PCI bus!\n");
+        printk("[INFO] Intel e1000 NIC not present: networking disabled\n");
         return -1;
     }
 

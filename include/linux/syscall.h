@@ -37,6 +37,7 @@
 #define __NR_listen  50
 #define __NR_recvfrom 51
 #define __NR_uname   59
+#define __NR_reboot  88
 #define __NR_dup2    63
 #define __NR_getcwd  79
 

@@ -15,6 +15,7 @@
 #include <linux/net.h>
 #include <linux/pci.h>
 #include <linux/xhci.h>
+#include <linux/acpi.h>
 #include <asm/io.h>
 
 /* Фоновый поток ядра */
@@ -123,9 +124,11 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     fs_init();
     minix_init();
     pci_scan_all();
+    acpi_init((mbi.flags & MB_FLAG_UEFI) ? (uint64_t)mbi.config_table : 0);
 
-    /* Временно отключаем xHCI, чтобы BIOS продолжал эмулировать USB-клавиатуру как PS/2 */
-    // xhci_init();
+    /* Этап 48: собственный драйвер xHCI + USB HID клавиатура (BIOS handoff:
+     * прошивка перестаёт эмулировать PS/2, управление берёт ядро) */
+    xhci_init();
 
     /* На реальном железе (UEFI) пока работаем на одном ядре: все AP стартовали
      * бы на одном общем стеке, а трамплин 0x8000 занят прошивкой. */
@@ -135,12 +138,14 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
 
     /* Запуск фонового потока ядра */
     kthread_create(kthread_heartbeat, NULL, "kworker");
+    usb_start_thread();
 
     if (initrd_start && initrd_end) {
         tarfs_mount(initrd_start, initrd_end);
     }
 
     int init_pid = task_create(user_trampoline, 10);
+    root_task_pid = init_pid;
 
     __asm__ volatile ("sti");
     printk("[OK] System Initialized. Launching /bin/sh via Task %d...\n", init_pid);

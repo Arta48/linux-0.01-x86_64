@@ -33,7 +33,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 
 ---
 
-## 🗺️ Реализованные этапы (Stages 1 – 47)
+## 🗺️ Реализованные этапы (Stages 1 – 48)
 
 * **Stage 1:** Multiboot-загрузка, 4-уровневый пейджинг (PML4, PDPT, PD 2MB Huge Pages), переход в Long Mode, видеовывод VGA `0xB8000` и COM1 `0x3F8`.
 * **Stage 2:** 64-битная IDT (16-байтовые шлюзы), перепрограммирование PIC 8259 на векторы 32..47, таймер PIT (100 Гц), счётчик `jiffies`.
@@ -84,7 +84,7 @@ A modern, complete reimplementation of Linus Torvalds' historic **Linux 0.01** k
 * **Stage 46:** Загрузчик UEFI `BOOTX64.EFI` (PE32+, собирается `tools/mkefi`), GOP, образ LiveUSB (`liveusb.img`, `tools/mkesp`).
 * **Stage 47:** Исправление загрузки на реальном железе (UEFI) и консоль на фреймбуфере. Загрузчик теперь резервирует память ядра/initrd через `AllocateAddress`, берёт размеры файлов через `GetInfo`, не использует `.bss`, выбирает непрерывную свободную область по карте памяти UEFI и сообщает ядру её границу (`MB_FLAG_UEFI`/`mem_upper`); при ошибке показывает причину, а не перезагружает ПК. Ядро: `mem_init()` с проверкой границ (раньше underflow приводил к triple fault), одноядерный режим на UEFI, COM1 с ограниченным ожиданием, буферный кэш больше не путает диск 0 со «свободным» буфером, Minix не форматирует чужой диск, исключение в Ring 3 завершает только процесс.
 
-> **Известное ограничение (решается в Stage 48):** после `ExitBootServices` прошивка перестаёт эмулировать USB-клавиатуру как PS/2, поэтому на реальном ПК ввод с USB-клавиатуры не работает, пока не готов драйвер USB HID (xHCI).
+* **Stage 48:** USB HID клавиатуры на собственном стеке xHCI (`kernel/xhci.c`, `kernel/usb_kbd.c`, `kernel/hid_parse.c`): BIOS/OS handoff (отключение SMI и PS/2-эмуляции прошивки), сброс контроллера, DCBAA + scratchpad, Command/Event/Transfer-кольца TRB, Enable Slot / Address Device / Evaluate Context / Configure Endpoint, control-передачи, Interrupt IN endpoint, опрос событий из таймерного IRQ0. Поддерживаются все контроллеры xHCI (до 4) и любое число клавиатур; USB-хабы 2.0 и SuperSpeed 3.x (рекурсивное перечисление, route string, Transaction Translator, `SET_HUB_DEPTH`, warm reset); клавиатуры с boot-протоколом и без него (разбор HID report descriptor: Report ID, NKRO-битовые карты, длинные отчёты); горячее подключение/отключение (поток `usbd`, период 500 мс); светодиоды CapsLock/NumLock/ScrollLock (`SET_REPORT`); преобразование HID Usage → ASCII (Shift, CapsLock, Ctrl+буква, Ctrl+C → SIGINT, стрелки, Home/End, цифровой блок, автоповтор). Подробный лог перечисления (`[OK] USB ... ifaces [...]`, `[USB] ...` для ошибок), `/proc/usb` и `/bin/usbinfo` показывают реальное состояние контроллеров и устройств. Исправления на реальном железе: `#GP(0x18)` после запуска `/bin/sh` на AMD (`STAR[63:48]` = `0x13`: AMD не добавляет RPL=3 к SS при `sysret`); `#GP` 0x13B от спурьёзного IRQ7 (в IDT добавлены шлюзы 34–47, спурьёзные IRQ7/IRQ15 распознаются по ISR PIC и не получают EOI). Выключение и перезагрузка ПК (`kernel/acpi.c`): UEFI-загрузчик передаёт ядру адрес ACPI RSDP, ядро разбирает FADT и `\_S5` из DSDT/SSDT; команды `poweroff`/`halt`/`reboot`, а выход из корневого шелла (`exit`) выключает компьютер; перезагрузка — через регистр сброса ACPI, контроллер 8042, порт 0xCF9 или тройную ошибку. Отсутствие ATA/IDE-диска и сетевой карты e1000 больше не выводится как ошибка (`[INFO]`, `/mnt` не монтируется). Цвет консоли по умолчанию — белый. Цель `make run-usb` проверяет драйвер в QEMU.
 
 ---
 
@@ -101,7 +101,7 @@ sudo pacman -S --needed base-devel qemu-system-x86 qemu-img mtools dosfstools ed
 ./compile.sh
 ```
 
-*(Для выхода из эмулятора нажмите **`Ctrl+A` затем `X`** или введите `exit` в шелле).*
+*(Для выхода из эмулятора нажмите **`Ctrl+A` затем `X`** или введите `exit` или `poweroff` в шелле).*
 
 ### Сборка загрузочной флешки (LiveUSB / UEFI / Ventoy)
 Для запуска на реальном ПК (например, AMD Ryzen 5 3600) или загрузки через Ventoy:

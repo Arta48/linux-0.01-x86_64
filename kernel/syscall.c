@@ -10,6 +10,7 @@
 #include <linux/time.h>
 #include <linux/tcp.h>
 #include <linux/elf.h>
+#include <linux/acpi.h>
 
 #define MSR_EFER   0xC0000080
 #define MSR_STAR   0xC0000081
@@ -41,7 +42,11 @@ void syscall_init(void)
     efer |= 1ULL;
     wrmsr(MSR_EFER, efer);
 
-    uint64_t star = ((uint64_t)0x0010 << 48) | ((uint64_t)0x0008 << 32);
+    /* STAR[63:48] = 0x13, а не 0x10: SYSRET берёт SS = STAR+8, CS = STAR+16.
+     * Процессоры AMD (в отличие от QEMU) НЕ добавляют RPL=3 к SS сами, поэтому
+     * RPL должен быть уже в значении STAR: SS = 0x1B, CS = 0x23. Иначе в кадре
+     * лежит SS=0x18 (RPL 0) и последующий iretq даёт #GP(0x18). */
+    uint64_t star = ((uint64_t)0x0013 << 48) | ((uint64_t)0x0008 << 32);
     wrmsr(MSR_STAR, star);
     wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
     wrmsr(MSR_SFMASK, 0x200);
@@ -527,6 +532,13 @@ int64_t sys_exit(int status)
         }
     }
 
+    /* Завершился корневой шелл (PID первого пользовательского процесса):
+     * как и в настоящем init, дальше работать нечему -- выключаем компьютер. */
+    if (root_task_pid >= 0 && (int)current->pid == root_task_pid) {
+        printk("[INIT] Root shell exited. Powering off...\n");
+        sys_reboot(0);
+    }
+
     current->exit_code = status;
     current->state = TASK_ZOMBIE;
     schedule();
@@ -677,6 +689,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             break;
         case __NR_sync:
             ret = sys_sync();
+            break;
+        case __NR_reboot:
+            ret = sys_reboot((int)arg1);
             break;
         case __NR_uname:
             ret = sys_uname((struct utsname *)arg1);

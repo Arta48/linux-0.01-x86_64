@@ -9,6 +9,7 @@
 #include <linux/hdreg.h>
 #include <linux/tcp.h>
 #include <linux/pci.h>
+#include <linux/xhci.h>
 
 struct proc_ram_file {
     struct ram_file base;
@@ -144,6 +145,11 @@ static void append_dec(char *buf, uint64_t *o, uint64_t max, int val, int width)
     while (--ti >= 0 && *o < max - 1) {
         buf[(*o)++] = tmp[ti];
     }
+}
+
+static void generate_usbinfo(char *buf, uint64_t max_len)
+{
+    usb_proc_dump(buf, max_len);
 }
 
 static void generate_pciinfo(char *buf, uint64_t max_len)
@@ -460,7 +466,7 @@ void fs_init(void)
         "uname -a\n"
         "export SHELL=/bin/sh\n"
         "export HOSTNAME=linux64\n"
-        "echo [INIT] Minix v1 persistence active on /mnt\n"
+        "echo [INIT] RAM root filesystem active; /mnt is Minix v1 when an ATA disk is present\n"
         "echo [INIT] Initialization complete.\n"
     };
 
@@ -519,6 +525,16 @@ void fs_init(void)
     ram_files[p_idx].base.is_readonly = 1;
     ram_files[p_idx].is_proc = 1;
     ram_files[p_idx].generator = generate_pciinfo;
+
+    /* Псевдофайл /proc/usb: реальное состояние xHCI и устройств */
+    int u_idx = 17;
+    memcpy(ram_files[u_idx].base.name, "/proc/usb", 10);
+    ram_files[u_idx].base.data = (char *)get_free_page();
+    ram_files[u_idx].base.capacity = PAGE_SIZE;
+    ram_files[u_idx].base.in_use = 1;
+    ram_files[u_idx].base.is_readonly = 1;
+    ram_files[u_idx].is_proc = 1;
+    ram_files[u_idx].generator = generate_usbinfo;
 
     /* Блочное устройство /dev/hda для жесткого диска */
     int hd_idx = 16;

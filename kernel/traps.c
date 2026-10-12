@@ -26,6 +26,10 @@ extern void isr8();  extern void isr9();  extern void isr10(); extern void isr11
 extern void isr12(); extern void isr13(); extern void isr14(); extern void isr15();
 extern void isr16(); extern void isr17(); extern void isr18(); extern void isr19();
 extern void isr32(); extern void isr33();
+extern void isr34(); extern void isr35(); extern void isr36();
+extern void isr37(); extern void isr38(); extern void isr39(); extern void isr40();
+extern void isr41(); extern void isr42(); extern void isr43(); extern void isr44();
+extern void isr45(); extern void isr46(); extern void isr47(); 
 extern void isr128();
 
 static void set_idt_gate(int n, uint64_t handler, uint8_t dpl)
@@ -86,6 +90,19 @@ void trap_init(void)
 
     set_idt_gate(32, (uint64_t)isr32, 0);
     set_idt_gate(33, (uint64_t)isr33, 0);
+    set_idt_gate(34, (uint64_t)isr34, 0);  set_idt_gate(35, (uint64_t)isr35, 0);
+    set_idt_gate(36, (uint64_t)isr36, 0);
+    set_idt_gate(37, (uint64_t)isr37, 0);
+    set_idt_gate(38, (uint64_t)isr38, 0);
+    set_idt_gate(39, (uint64_t)isr39, 0);
+    set_idt_gate(40, (uint64_t)isr40, 0);
+    set_idt_gate(41, (uint64_t)isr41, 0);
+    set_idt_gate(42, (uint64_t)isr42, 0);
+    set_idt_gate(43, (uint64_t)isr43, 0);
+    set_idt_gate(44, (uint64_t)isr44, 0);
+    set_idt_gate(45, (uint64_t)isr45, 0);
+    set_idt_gate(46, (uint64_t)isr46, 0);
+    set_idt_gate(47, (uint64_t)isr47, 0);
     set_idt_gate(128, (uint64_t)isr128, 3);
 
     pic_remap();
@@ -116,6 +133,8 @@ void isr_handler(struct trap_frame *tf)
             check_serial_events(); /* Асинхронный опрос терминала каждые 10 мс */
             extern void net_poll(void);
             net_poll();
+            extern void usb_kbd_poll(void);
+            usb_kbd_poll();
             outb(0x20, 0x20);
             do_timer();
 
@@ -143,6 +162,19 @@ void isr_handler(struct trap_frame *tf)
             outb(0x20, 0x20);
             return;
         }
+        /* Спурьёзные IRQ7 / IRQ15 (на реальном железе приходят регулярно):
+         * читаем ISR PIC; если бит 7 не выставлен — EOI не нужен. */
+        if (tf->int_no == 39) {
+            outb(0x0B, 0x20);
+            if (!(inb(0x20) & 0x80)) return;
+        }
+        if (tf->int_no == 47) {
+            outb(0x0B, 0xA0);
+            if (!(inb(0xA0) & 0x80)) {
+                outb(0x20, 0x20); /* EOI только мастеру (каскад) */
+                return;
+            }
+        }
         if (tf->int_no >= 40) {
             outb(0x20, 0xA0);
         }
@@ -162,8 +194,8 @@ void isr_handler(struct trap_frame *tf)
     if (tf->int_no < 20 && (tf->cs & 3) == 3 && current && current->pid > 1) {
         uint64_t cr2 = 0;
         if (tf->int_no == 14) __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-        printk("\n[Process %d killed: %s at RIP %p, addr %p]\n",
-               (int)current->pid, exceptions[tf->int_no], tf->rip, cr2);
+        printk("\n[Process %d killed: %s at RIP %p, addr %p, err %p]\n",
+               (int)current->pid, exceptions[tf->int_no], tf->rip, cr2, tf->error_code);
         __asm__ volatile ("sti");
         sys_exit(128 + 11);
         return;

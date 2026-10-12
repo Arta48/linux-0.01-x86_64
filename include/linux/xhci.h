@@ -20,7 +20,7 @@
 #define XHCI_STS_HCH    (1U << 0)  /* Host Controller Halted */
 #define XHCI_STS_CNR    (1U << 11) /* Controller Not Ready */
 
-/* Информация о контроллере и портах */
+/* Информация о контроллере и портах (первый найденный контроллер) */
 struct xhci_port_status {
     int port_num;
     int connected;
@@ -42,7 +42,19 @@ struct xhci_info {
     struct xhci_port_status ports[16];
 };
 
+/* Находит ВСЕ контроллеры xHCI, забирает управление у BIOS, перечисляет устройства
+ * (включая USB-хабы) и поднимает все USB HID boot-клавиатуры.
+ * Возвращает число найденных клавиатур. */
 int  xhci_init(void);
 const struct xhci_info *xhci_get_info(void);
+
+/* Опрос событий из таймерного прерывания (каждые 10 мс) */
+void usb_kbd_poll(void);
+
+/* Поток ядра: горячее подключение, светодиоды клавиатуры, опрос хабов */
+void usb_start_thread(void);
+
+/* Текст для /proc/usb */
+void usb_proc_dump(char *buf, uint64_t max_len);
 
 #endif

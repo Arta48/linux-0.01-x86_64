@@ -977,7 +977,9 @@ static void execute_command(const char *cmd)
             printf("  date / sleep    - system time & sleeping\n");
             printf("  ps / kill / wait- process management\n");
             printf("  uname [-a]      - print system information\n");
-            printf("  clear / exit    - terminal control\n");
+            printf("  clear / exit    - terminal control (exit of the root shell powers off)\n");
+            printf("  poweroff / halt - flush disks and power the computer off (ACPI)\n");
+            printf("  reboot          - flush disks and restart the computer\n");
             printf("  httpd           - run Ring 3 user space HTTP web server (port 80)\n");
             last_exit_code = 0;
         } else if (strcmp(exec_cmd, "sync") == 0) {
@@ -1022,6 +1024,13 @@ static void execute_command(const char *cmd)
                 }
                 close(fd);
             }
+        } else if (strcmp(exec_cmd, "poweroff") == 0 || strcmp(exec_cmd, "shutdown") == 0 ||
+                   strcmp(exec_cmd, "halt") == 0) {
+            reboot(0);
+            last_exit_code = 1;
+        } else if (strcmp(exec_cmd, "reboot") == 0) {
+            reboot(1);
+            last_exit_code = 1;
         } else if (strcmp(exec_cmd, "clear") == 0) {
             printf("\033[2J\033[H");
             last_exit_code = 0;

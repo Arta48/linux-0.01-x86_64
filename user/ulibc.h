@@ -91,6 +91,7 @@ int     kill(int pid, int sig);
 int     signal(int sig, void (*handler)(int));
 int     uname(struct utsname *name);
 int     sync(void);
+int     reboot(int cmd);   /* 0 = выключить, 1 = перезагрузить, 2 = остановить */
 int     socket(int domain, int type, int protocol);
 int     bind(int sockfd, uint16_t port);
 int     listen(int sockfd, int backlog);

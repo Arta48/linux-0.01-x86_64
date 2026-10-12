@@ -43,6 +43,30 @@ extern void uefi_kernel_jump(uint64_t magic, uint64_t mbi_addr, uint64_t entry_p
 #define IDMAP_LIMIT        (1ULL << 30)              /* identity-map ядра: 1 ГБ */
 #define MMAP_PAGES         32                         /* 128 КБ под карту памяти */
 
+static const EFI_GUID acpi20_guid = { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } };
+static const EFI_GUID acpi10_guid = { 0xeb9d2d30, 0x2d88, 0x11d3, { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } };
+
+static int guid_eq(const EFI_GUID *a, const EFI_GUID *b)
+{
+    const uint8_t *x = (const uint8_t *)a, *y = (const uint8_t *)b;
+    for (int i = 0; i < 16; i++) if (x[i] != y[i]) return 0;
+    return 1;
+}
+
+/* Адрес ACPI RSDP из таблицы конфигурации UEFI (нужен ядру для выключения ПК) */
+static uint64_t find_rsdp(EFI_SYSTEM_TABLE *st)
+{
+    uint8_t *t = (uint8_t *)st->ConfigurationTable;
+    uint64_t v1 = 0;
+    for (uint64_t i = 0; i < st->NumberOfTableEntries; i++) {
+        const EFI_GUID *g = (const EFI_GUID *)(t + i * 24);
+        uint64_t vt = *(uint64_t *)(t + i * 24 + 16);
+        if (guid_eq(g, &acpi20_guid)) return vt;
+        if (guid_eq(g, &acpi10_guid)) v1 = vt;
+    }
+    return v1;
+}
+
 static EFI_GUID file_info_guid = EFI_FILE_INFO_GUID;
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *con;
 
@@ -229,6 +253,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     struct mb_module *mod = (struct mb_module *)(mbi_page + 512);
 
     mbi->flags = MB_FLAG_UEFI;
+    {
+        uint64_t rsdp = find_rsdp(SystemTable);
+        if (rsdp && rsdp < (1ULL << 32)) mbi->config_table = (uint32_t)rsdp;
+    }
     if (initrd_size) {
         mod->mod_start = (uint32_t)initrd_addr;
         mod->mod_end   = (uint32_t)(initrd_addr + initrd_size);

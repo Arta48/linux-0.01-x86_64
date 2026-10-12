@@ -462,6 +462,12 @@ int minix_mount(uint8_t dev)
 void minix_init(void)
 {
     buffer_init();
+    const struct hd_drive_info *hd = ide_get_drive(0);
+    if (!hd || !hd->present) {
+        /* Нет ATA/IDE-диска (типично для NVMe/SATA-AHCI/USB-ПК): это не ошибка */
+        printk("[INFO] No ATA/IDE disk found: /mnt is not mounted (RAM filesystem only)\n");
+        return;
+    }
     minix_mount(0);
 }
 
