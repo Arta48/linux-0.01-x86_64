@@ -10,6 +10,7 @@
 #include <linux/tcp.h>
 #include <linux/pci.h>
 #include <linux/xhci.h>
+#include <linux/blkdev.h>
 
 struct proc_ram_file {
     struct ram_file base;
@@ -150,6 +151,11 @@ static void append_dec(char *buf, uint64_t *o, uint64_t max, int val, int width)
 static void generate_usbinfo(char *buf, uint64_t max_len)
 {
     usb_proc_dump(buf, max_len);
+}
+
+static void generate_disks(char *buf, uint64_t max_len)
+{
+    blk_proc_dump(buf, max_len);
 }
 
 static void generate_pciinfo(char *buf, uint64_t max_len)
@@ -536,12 +542,22 @@ void fs_init(void)
     ram_files[u_idx].is_proc = 1;
     ram_files[u_idx].generator = generate_usbinfo;
 
+    /* Псевдофайл /proc/disks: диски и разделы блочного слоя */
+    int dk_idx = 18;
+    memcpy(ram_files[dk_idx].base.name, "/proc/disks", 12);
+    ram_files[dk_idx].base.data = (char *)get_free_page();
+    ram_files[dk_idx].base.capacity = PAGE_SIZE;
+    ram_files[dk_idx].base.in_use = 1;
+    ram_files[dk_idx].base.is_readonly = 1;
+    ram_files[dk_idx].is_proc = 1;
+    ram_files[dk_idx].generator = generate_disks;
+
     /* Блочное устройство /dev/hda для жесткого диска */
     int hd_idx = 16;
-    const struct hd_drive_info *hd = ide_get_drive(0);
+    const struct blk_dev *hd = blk_get(0);
     memcpy(ram_files[hd_idx].base.name, "/dev/hda", 9);
     ram_files[hd_idx].base.data = NULL;
-    ram_files[hd_idx].base.size = hd ? ((uint64_t)hd->sectors * 512) : 0;
+    ram_files[hd_idx].base.size = (hd && hd->present) ? (hd->sectors * 512) : 0;
     ram_files[hd_idx].base.capacity = ram_files[hd_idx].base.size;
     ram_files[hd_idx].base.in_use = 1;
     ram_files[hd_idx].base.is_readonly = 0;
@@ -549,6 +565,28 @@ void fs_init(void)
     ram_files[hd_idx].base.is_dev_blk = 1;
     ram_files[hd_idx].base.dev_id = 0;
     ram_files[hd_idx].base.mode = 0660;
+
+    /* Остальные диски и разделы: /dev/nvme0n1, /dev/nvme0n1p2, ... Только чтение:
+     * запись разрешается лишь смонтированному разделу Minix через блочный слой. */
+    for (int bi = 1; bi < blk_count(); bi++) {
+        const struct blk_dev *bd = blk_get(bi);
+        if (!bd || !bd->present) continue;
+        int slot = -1;
+        for (int k = 19; k < MAX_FILES; k++) if (!ram_files[k].base.in_use) { slot = k; break; }
+        if (slot < 0) break;
+        memcpy(ram_files[slot].base.name, "/dev/", 5);
+        uint64_t nl = strlen(bd->name);
+        memcpy(ram_files[slot].base.name + 5, bd->name, nl + 1);
+        ram_files[slot].base.data = NULL;
+        ram_files[slot].base.size = bd->sectors * 512;
+        ram_files[slot].base.capacity = ram_files[slot].base.size;
+        ram_files[slot].base.in_use = 1;
+        ram_files[slot].base.is_readonly = 1;
+        ram_files[slot].base.is_dir = 0;
+        ram_files[slot].base.is_dev_blk = 1;
+        ram_files[slot].base.dev_id = (uint8_t)bi;
+        ram_files[slot].base.mode = 0440;
+    }
 
     printk("[OK] Multi-user VFS Initialized (/mnt ready for Minix FS)\n");
 }
@@ -738,7 +776,7 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
         char sec_buf[512];
 
         while (read_bytes < bytes_to_read) {
-            if (ide_read_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf) < 0) {
+            if (blk_read(rf->dev_id, lba, 1, sec_buf) < 0) {
                 break;
             }
             uint64_t chunk = 512 - offset;
@@ -812,11 +850,11 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
             }
 
             if (offset != 0 || chunk < 512) {
-                ide_read_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf);
+                blk_read(rf->dev_id, lba, 1, sec_buf);
             }
             memcpy(sec_buf + offset, buf + written_bytes, chunk);
 
-            if (ide_write_sectors(rf->dev_id, (uint32_t)lba, 1, sec_buf) < 0) {
+            if (blk_write(rf->dev_id, lba, 1, sec_buf) < 0) {
                 break;
             }
 

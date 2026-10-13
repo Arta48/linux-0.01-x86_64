@@ -510,6 +510,25 @@ static int64_t sys_uname(struct utsname *name)
     return 0;
 }
 
+/* lseek: SEEK_SET=0, SEEK_CUR=1, SEEK_END=2 (END -- только для файлов ramfs и устройств /dev) */
+static int64_t sys_lseek(int fd, int64_t off, int whence)
+{
+    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
+    struct file *f = &current->filp[fd];
+    if (f->type == FILE_TYPE_PIPE || f->type == FILE_TYPE_SOCKET) return -1;
+
+    int64_t base;
+    if (whence == 0) base = 0;
+    else if (whence == 1) base = (int64_t)f->pos;
+    else if (whence == 2 && f->rf) base = (int64_t)f->rf->size;
+    else return -1;
+
+    int64_t np = base + off;
+    if (np < 0) return -1;
+    f->pos = (uint64_t)np;
+    return np;
+}
+
 int64_t sys_sync(void)
 {
     minix_sync();
@@ -623,6 +642,9 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
             break;
         case __NR_close:
             ret = sys_close((int)arg1);
+            break;
+        case __NR_lseek:
+            ret = sys_lseek((int)arg1, (int64_t)arg2, (int)arg3);
             break;
         case __NR_unlink:
             ret = sys_unlink((const char *)arg1);

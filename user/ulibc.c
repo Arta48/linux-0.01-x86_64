@@ -14,6 +14,7 @@
 #define __NR_time    13
 #define __NR_chmod   15
 #define __NR_stat    18
+#define __NR_lseek   19
 #define __NR_getpid  20
 #define __NR_ps      21
 #define __NR_list    22
@@ -76,6 +77,7 @@ static inline int64_t syscall4(uint64_t nr, uint64_t a1, uint64_t a2, uint64_t a
 
 int open(const char *path, int flags) { return (int)syscall2(__NR_open, (uint64_t)path, flags); }
 int close(int fd) { return (int)syscall1(__NR_close, fd); }
+int64_t lseek(int fd, int64_t offset, int whence) { return syscall3(__NR_lseek, fd, (uint64_t)offset, whence); }
 int64_t read(int fd, void *buf, size_t count) { return syscall3(__NR_read, fd, (uint64_t)buf, count); }
 int64_t write(int fd, const void *buf, size_t count) { return syscall3(__NR_write, fd, (uint64_t)buf, count); }
 void exit(int status) { syscall1(__NR_exit, status); for(;;); }

@@ -17,14 +17,14 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o kernel/hd.o kernel/smp.o kernel/trampoline.o \
-       kernel/kthread.o kernel/pci.o kernel/acpi.o kernel/xhci.o kernel/usb_kbd.o kernel/hid_parse.o kernel/e1000.o kernel/net.o kernel/net_stack.o \
+       kernel/kthread.o kernel/pci.o kernel/blk.o kernel/nvme.o kernel/acpi.o kernel/xhci.o kernel/usb_kbd.o kernel/hid_parse.o kernel/e1000.o kernel/net.o kernel/net_stack.o \
        fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
                 rootfs/bin/nano rootfs/bin/hdtest rootfs/bin/mintest rootfs/bin/cowtest \
                 rootfs/bin/smpinfo rootfs/bin/threadtest rootfs/bin/nettest rootfs/bin/ping \
                 rootfs/bin/httpd rootfs/bin/tcc rootfs/bin/cc rootfs/bin/elfhello \
-                rootfs/bin/dltest rootfs/lib/libmath.so rootfs/bin/lspci rootfs/bin/usbinfo
+                rootfs/bin/dltest rootfs/lib/libmath.so rootfs/bin/lspci rootfs/bin/usbinfo rootfs/bin/lsblk rootfs/bin/sectdump
 
 all: Image rootfs.tar disk.img usbdisk.img BOOTX64.EFI liveusb.img
 
@@ -179,6 +179,12 @@ rootfs/bin/threadtest: user/crt0.o user/threadtest.o user/ulibc.o user/user.ld
 kernel/pci.o: kernel/pci.c
 	$(CC) $(CFLAGS) -c kernel/pci.c -o kernel/pci.o
 
+kernel/blk.o: kernel/blk.c include/linux/blkdev.h
+	$(CC) $(CFLAGS) -c kernel/blk.c -o kernel/blk.o
+
+kernel/nvme.o: kernel/nvme.c include/linux/blkdev.h
+	$(CC) $(CFLAGS) -c kernel/nvme.c -o kernel/nvme.o
+
 kernel/acpi.o: kernel/acpi.c include/linux/acpi.h
 	$(CC) $(CFLAGS) -c kernel/acpi.c -o kernel/acpi.o
 
@@ -263,6 +269,20 @@ user/usbinfo.o: user/usbinfo.c user/ulibc.h
 rootfs/bin/usbinfo: user/crt0.o user/usbinfo.o user/ulibc.o user/user.ld
 	@mkdir -p rootfs/bin
 	$(LD) -T user/user.ld -static user/crt0.o user/usbinfo.o user/ulibc.o -o rootfs/bin/usbinfo
+
+user/lsblk.o: user/lsblk.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/lsblk.c -o user/lsblk.o
+
+rootfs/bin/lsblk: user/crt0.o user/lsblk.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/lsblk.o user/ulibc.o -o rootfs/bin/lsblk
+
+user/sectdump.o: user/sectdump.c user/ulibc.h
+	$(CC) $(USER_CFLAGS) -c user/sectdump.c -o user/sectdump.o
+
+rootfs/bin/sectdump: user/crt0.o user/sectdump.o user/ulibc.o user/user.ld
+	@mkdir -p rootfs/bin
+	$(LD) -T user/user.ld -static user/crt0.o user/sectdump.o user/ulibc.o -o rootfs/bin/sectdump
 
 tools/mkefi: tools/mkefi.c
 	gcc -O2 tools/mkefi.c -o tools/mkefi

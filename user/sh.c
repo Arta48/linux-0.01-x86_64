@@ -944,6 +944,8 @@ static void execute_command(const char *cmd)
             printf("  help            - show this help message\n");
             printf("  sync            - flush all dirty filesystem buffers to disk\n");
             printf("  hdinfo          - display detected ATA hard drive info\n");
+            printf("  lsblk           - list disks and partitions (NVMe/SATA/ATA), /proc/disks\n");
+            printf("  sectdump <dev> [lba] [n] - hex dump of disk sectors (read-only)\n");
             printf("  netinfo         - display Intel e1000 network interface status\n");
             printf("  ping [ip]       - send ICMP echo request packets to target IP\n");
             printf("  smpinfo         - view multi-core SMP and APIC status\n");

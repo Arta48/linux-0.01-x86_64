@@ -1,6 +1,6 @@
 #include <linux/buffer.h>
 #include <linux/mm.h>
-#include <linux/hdreg.h>
+#include <linux/blkdev.h>
 #include <linux/string.h>
 #include <linux/tty.h>
 
@@ -140,8 +140,8 @@ struct buffer_head *bread(uint16_t dev, uint32_t block)
     }
 
     /* 1 блок = 2 сектора по 512 байт в режиме LBA28 */
-    uint32_t lba = block * 2;
-    if (ide_read_sectors((uint8_t)dev, lba, 2, bh->b_data) < 0) {
+    uint64_t lba = (uint64_t)block * 2;
+    if (blk_read(dev, lba, 2, bh->b_data) < 0) {
         printk("[BUFFER] Error reading block %d from dev %d!\n", block, dev);
         brelse(bh);
         return NULL;
@@ -163,8 +163,8 @@ void bwrite(struct buffer_head *bh)
 {
     if (!bh || !bh->b_dirt) return;
 
-    uint32_t lba = bh->b_blocknr * 2;
-    if (ide_write_sectors((uint8_t)bh->b_dev, lba, 2, bh->b_data) < 0) {
+    uint64_t lba = (uint64_t)bh->b_blocknr * 2;
+    if (blk_write(bh->b_dev, lba, 2, bh->b_data) < 0) {
         printk("[BUFFER] Error writing block %d to dev %d!\n", bh->b_blocknr, bh->b_dev);
         return;
     }

@@ -6,6 +6,7 @@
 #include <linux/tty.h>
 #include <linux/mm.h>
 #include <linux/hdreg.h>
+#include <linux/blkdev.h>
 
 static struct minix_super_block sb;
 static int minix_mounted = 0;
@@ -426,7 +427,7 @@ int minix_mount(uint8_t dev)
     minix_dev = dev;
     struct buffer_head *bh = bread(dev, 1);
     if (!bh) {
-        printk("[MINIX] Error: Cannot read superblock from /dev/hda!\n");
+        printk("[MINIX] Error: Cannot read superblock from /dev/%s!\n", blk_get(dev)->name);
         return -1;
     }
 
@@ -440,7 +441,7 @@ int minix_mount(uint8_t dev)
         for (uint32_t i = 0; i < sizeof(sb); i++) {
             if (((uint8_t *)&sb)[i]) { blank = 0; break; }
         }
-        if (!blank) {
+        if (!blank || dev != 0) {
             printk("[MINIX] Not a Minix v1 disk (magic 0x%x) - refusing to format, /mnt disabled\n", sb.s_magic);
             return -1;
         }
@@ -454,21 +455,33 @@ int minix_mount(uint8_t dev)
     }
 
     minix_mounted = 1;
-    printk("[OK] Minix v1 Filesystem mounted on /mnt (/dev/hda: %d zones, %d inodes)\n",
-           sb.s_nzones, sb.s_ninodes);
+    printk("[OK] Minix v1 Filesystem mounted on /mnt (/dev/%s: %d zones, %d inodes)\n",
+           blk_get(dev)->name, sb.s_nzones, sb.s_ninodes);
     return 0;
 }
 
 void minix_init(void)
 {
     buffer_init();
-    const struct hd_drive_info *hd = ide_get_drive(0);
-    if (!hd || !hd->present) {
-        /* Нет ATA/IDE-диска (типично для NVMe/SATA-AHCI/USB-ПК): это не ошибка */
-        printk("[INFO] No ATA/IDE disk found: /mnt is not mounted (RAM filesystem only)\n");
+
+    /* ATA/IDE (hda): прежнее поведение, включая форматирование чистого диска */
+    const struct blk_dev *hd = blk_get(0);
+    if (hd && hd->present) {
+        minix_mount(0);
         return;
     }
-    minix_mount(0);
+
+    /* NVMe/SATA: монтируем только раздел, где уже есть Minix v1; никогда не форматируем.
+     * Именно этому разделу (и только ему) разрешается запись. */
+    int dev = blk_find_minix();
+    if (dev < 0) {
+        printk("[INFO] No Minix v1 partition found: /mnt is not mounted (RAM filesystem only)\n");
+        printk("[INFO] To persist data: create a partition and run  mkfs.minix -1 -n 14 /dev/<partition>\n");
+        return;
+    }
+    blk_set_writable(dev, 1);
+    printk("[OK] Minix v1 found on /dev/%s: mounting on /mnt (read-write)\n", blk_get(dev)->name);
+    if (minix_mount((uint8_t)dev) < 0) blk_set_writable(dev, 0);
 }
 
 int minix_sys_open(const char *path, int flags, uint16_t mode, uint32_t *out_ino, uint64_t *out_size)
@@ -859,4 +872,5 @@ const char *minix_get_file_data(const char *path, uint64_t *out_size)
 void minix_sync(void)
 {
     bflush();
+    blk_flush_all();            /* сброс кэша записи самих дисков (NVMe/SATA) */
 }

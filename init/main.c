@@ -16,6 +16,7 @@
 #include <linux/pci.h>
 #include <linux/xhci.h>
 #include <linux/acpi.h>
+#include <linux/blkdev.h>
 #include <asm/io.h>
 
 /* Фоновый поток ядра */
@@ -120,10 +121,10 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     trap_init();
     syscall_init();
     sched_init();
-    ide_init();
+    pci_scan_all();
+    storage_init();       /* ATA/IDE, NVMe, разделы GPT/MBR */
     fs_init();
     minix_init();
-    pci_scan_all();
     acpi_init((mbi.flags & MB_FLAG_UEFI) ? (uint64_t)mbi.config_table : 0);
 
     /* Этап 48: собственный драйвер xHCI + USB HID клавиатура (BIOS handoff:
