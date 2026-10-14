@@ -84,20 +84,91 @@ static void draw_char(char c, int cx, int cy, uint32_t fg, uint32_t bg)
     }
 }
 
+/* Текстовый буфер в ОЗУ. Видеопамять UEFI GOP часто write-combining/uncached:
+ * чтение из неё (memmove при прокрутке) занимает секунды на строку и выглядит
+ * как медленная "перезапись по кругу". Поэтому прокрутка делается в ОЗУ, а в
+ * видеопамять только пишем, и только изменившиеся символы.
+ * Ячейка: младший байт -- символ, старший -- атрибуты (бит 0 = инверсия). */
+#define CON_MAX_COLS 320
+#define CON_MAX_ROWS 160
+#define ATTR_REV   0x100
+#define SHOWN_NONE 0xFFFF
+static uint16_t cells[CON_MAX_ROWS][CON_MAX_COLS]; /* что должно быть на экране */
+static uint16_t shown[CON_MAX_ROWS][CON_MAX_COLS]; /* что реально нарисовано     */
+static int con_cols = 0;
+static int con_rows = 0;
+static uint16_t cur_attr = 0;       /* текущие атрибуты вывода (ESC[..m) */
+static int cursor_drawn = 0;        /* курсор сейчас нарисован на экране */
+
+static void draw_cell(uint16_t v, int cx, int cy)
+{
+    uint32_t fg = current_fg, bg = current_bg;
+    if (v & ATTR_REV) { fg = current_bg; bg = current_fg; }
+    draw_char((char)(v & 0xFF), cx, cy, fg, bg);
+}
+
+static void put_cell(char c, int cx, int cy)
+{
+    if (cx < 0 || cy < 0 || cx >= con_cols || cy >= con_rows) return;
+    uint16_t v = (uint16_t)((unsigned char)c | cur_attr);
+    cells[cy][cx] = v;
+    if (shown[cy][cx] != v) {
+        shown[cy][cx] = v;
+        draw_cell(v, cx, cy);
+    }
+}
+
+/* Заполнить ячейки пробелами (обычный фон): стирание строки/экрана */
+static void erase_cells(int y, int x0, int x1)
+{
+    if (y < 0 || y >= con_rows) return;
+    if (x0 < 0) x0 = 0;
+    if (x1 > con_cols) x1 = con_cols;
+    for (int x = x0; x < x1; x++) {
+        cells[y][x] = ' ';
+        if (shown[y][x] != ' ') {
+            shown[y][x] = ' ';
+            draw_cell(' ', x, y);
+        }
+    }
+}
+
+/* Курсор: инвертированная ячейка. Убираем перед любым выводом, рисуем после. */
+static void cursor_hide(void)
+{
+    if (!cursor_drawn) return;
+    cursor_drawn = 0;
+    if (cursor_x < con_cols && cursor_y < con_rows) {
+        uint16_t v = cells[cursor_y][cursor_x];
+        shown[cursor_y][cursor_x] = v;
+        draw_cell(v, cursor_x, cursor_y);
+    }
+}
+
+static void cursor_show(void)
+{
+    if (cursor_x >= con_cols || cursor_y >= con_rows) return;
+    uint16_t v = cells[cursor_y][cursor_x] ^ ATTR_REV;
+    shown[cursor_y][cursor_x] = SHOWN_NONE;  /* при любом обновлении перерисуется */
+    draw_cell(v, cursor_x, cursor_y);
+    cursor_drawn = 1;
+}
+
 static void fb_scroll(void)
 {
     if (!fb) return;
-    uint32_t row_size = fb_pitch / 4;
-    uint32_t lines_to_move = fb_height - 8;
+    for (int r = 0; r < con_rows - 1; r++)
+        for (int x = 0; x < con_cols; x++)
+            cells[r][x] = cells[r + 1][x];
+    for (int x = 0; x < con_cols; x++)
+        cells[con_rows - 1][x] = ' ';
 
-    /* Сдвигаем все пиксели вверх на 8 пикселей (1 строка текста) */
-    memmove(fb, fb + (8 * row_size), lines_to_move * fb_pitch);
-
-    /* Очищаем нижнюю строку */
-    uint32_t *bottom_row = fb + (lines_to_move * row_size);
-    for (uint32_t i = 0; i < 8 * row_size; i++) {
-        bottom_row[i] = current_bg;
-    }
+    for (int r = 0; r < con_rows; r++)
+        for (int x = 0; x < con_cols; x++)
+            if (cells[r][x] != shown[r][x]) {
+                shown[r][x] = cells[r][x];
+                draw_cell(cells[r][x], x, r);
+            }
     cursor_y--;
 }
 
@@ -108,8 +179,12 @@ static void fb_clear(void)
     for (uint32_t i = 0; i < total_pixels; i++) {
         fb[i] = current_bg;
     }
+    for (int r = 0; r < CON_MAX_ROWS; r++)
+        for (int x = 0; x < CON_MAX_COLS; x++)
+            cells[r][x] = shown[r][x] = ' ';
     cursor_x = 0;
     cursor_y = 0;
+    cursor_drawn = 0;
 }
 
 void console_init(void)
@@ -121,6 +196,10 @@ void console_init(void)
         fb_width = mbi.framebuffer_width;
         fb_height = mbi.framebuffer_height;
         fb_pitch = mbi.framebuffer_pitch;
+        con_cols = fb_width / 8;
+        con_rows = fb_height / 8;
+        if (con_cols > CON_MAX_COLS) con_cols = CON_MAX_COLS;
+        if (con_rows > CON_MAX_ROWS) con_rows = CON_MAX_ROWS;
 
         /* Проецируем физическую видеопамять в ядро */
         uint64_t fb_phys = mbi.framebuffer_addr;
@@ -146,6 +225,102 @@ static void serial_out(char c)
     }
 }
 
+/* ---- Разбор ANSI/VT100 (CSI) для экрана: nano, clear и т.п. ---- */
+static int esc_state = 0;           /* 0 текст, 1 после ESC, 2 внутри CSI */
+static int esc_par[6];
+static int esc_have[6];
+static int esc_np = 0;
+static int esc_priv = 0;
+static int saved_x = 0, saved_y = 0;
+
+static int esc_p(int i, int def)
+{
+    return (i <= esc_np && esc_have[i] && esc_par[i] > 0) ? esc_par[i] : def;
+}
+
+static void clampcur(void)
+{
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_x >= con_cols) cursor_x = con_cols - 1;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_y >= con_rows) cursor_y = con_rows - 1;
+}
+
+static void csi_exec(char f)
+{
+    if (esc_priv) return;           /* ESC[?25l и т.п. -- игнорируем */
+    switch (f) {
+    case 'H': case 'f':
+        cursor_y = esc_p(0, 1) - 1;
+        cursor_x = esc_p(1, 1) - 1;
+        clampcur();
+        break;
+    case 'A': cursor_y -= esc_p(0, 1); clampcur(); break;
+    case 'B': cursor_y += esc_p(0, 1); clampcur(); break;
+    case 'C': cursor_x += esc_p(0, 1); clampcur(); break;
+    case 'D': cursor_x -= esc_p(0, 1); clampcur(); break;
+    case 'G': cursor_x = esc_p(0, 1) - 1; clampcur(); break;
+    case 'd': cursor_y = esc_p(0, 1) - 1; clampcur(); break;
+    case 'K': {
+        int m = esc_have[0] ? esc_par[0] : 0;
+        if (m == 0)      erase_cells(cursor_y, cursor_x, con_cols);
+        else if (m == 1) erase_cells(cursor_y, 0, cursor_x + 1);
+        else             erase_cells(cursor_y, 0, con_cols);
+        break;
+    }
+    case 'J': {
+        int m = esc_have[0] ? esc_par[0] : 0;
+        if (m == 0) {
+            erase_cells(cursor_y, cursor_x, con_cols);
+            for (int y = cursor_y + 1; y < con_rows; y++) erase_cells(y, 0, con_cols);
+        } else if (m == 1) {
+            for (int y = 0; y < cursor_y; y++) erase_cells(y, 0, con_cols);
+            erase_cells(cursor_y, 0, cursor_x + 1);
+        } else {
+            for (int y = 0; y < con_rows; y++) erase_cells(y, 0, con_cols);
+        }
+        break;
+    }
+    case 'm':
+        for (int i = 0; i <= esc_np; i++) {
+            int v = esc_have[i] ? esc_par[i] : 0;
+            if (v == 0 || v == 27) cur_attr = 0;
+            else if (v == 7) cur_attr = ATTR_REV;
+            /* остальные атрибуты (цвета, жирный) пока не поддерживаются */
+        }
+        break;
+    case 's': saved_x = cursor_x; saved_y = cursor_y; break;
+    case 'u': cursor_x = saved_x; cursor_y = saved_y; clampcur(); break;
+    default: break;
+    }
+}
+
+static void esc_feed(char c)
+{
+    if (esc_state == 1) {
+        if (c == '[') {
+            esc_state = 2; esc_np = 0; esc_priv = 0;
+            for (int i = 0; i < 6; i++) { esc_par[i] = 0; esc_have[i] = 0; }
+        } else {
+            esc_state = 0;          /* другие ESC-последовательности пропускаем */
+        }
+        return;
+    }
+    if (c >= '0' && c <= '9') {
+        esc_par[esc_np] = esc_par[esc_np] * 10 + (c - '0');
+        esc_have[esc_np] = 1;
+    } else if (c == ';') {
+        if (esc_np < 5) esc_np++;
+    } else if (c == '?' || c == '>' || c == '=') {
+        esc_priv = 1;
+    } else if (c >= 0x40 && c <= 0x7E) {
+        csi_exec(c);
+        esc_state = 0;
+    } else if (c < 0x20 || c >= 0x7F) {
+        esc_state = 0;              /* мусор: выходим из последовательности */
+    }
+}
+
 void console_putc(char c)
 {
     if (c == '\b' || c == 127) {
@@ -156,27 +331,43 @@ void console_putc(char c)
 
         /* На экране (Framebuffer) */
         if (fb && cursor_x > 0) {
+            cursor_hide();
             cursor_x--;
-            draw_char(' ', cursor_x, cursor_y, current_fg, current_bg);
+            uint16_t keep = cur_attr; cur_attr = 0;
+            put_cell(' ', cursor_x, cursor_y);
+            cur_attr = keep;
+            cursor_show();
         }
         return;
     }
 
-    /* Пишем в COM1 */
+    /* Пишем в COM1 (терминал QEMU сам разбирает ESC-последовательности) */
     serial_out(c);
 
     if (!fb) return; /* Если фреймбуфера нет (BIOS режим), ничего не рисуем на экран */
 
-        int max_cols = fb_width / 8;
-    int max_rows = fb_height / 8;
+    cursor_hide();
 
-    if (c == '\n') {
+    int max_cols = con_cols;
+    int max_rows = con_rows;
+
+    if (esc_state) {
+        esc_feed(c);
+    } else if (c == 27) {
+        esc_state = 1;
+    } else if (c == '\n') {
         cursor_x = 0;
         cursor_y++;
     } else if (c == '\r') {
         cursor_x = 0;
+    } else if (c == '\t') {
+        int nx = (cursor_x + 8) & ~7;
+        while (cursor_x < nx && cursor_x < max_cols - 1) {
+            put_cell(' ', cursor_x, cursor_y);
+            cursor_x++;
+        }
     } else if ((unsigned char)c >= 32) {
-        draw_char(c, cursor_x, cursor_y, current_fg, current_bg);
+        put_cell(c, cursor_x, cursor_y);
         cursor_x++;
         if (cursor_x >= max_cols) {
             cursor_x = 0;
@@ -187,6 +378,7 @@ void console_putc(char c)
     if (cursor_y >= max_rows) {
         fb_scroll();
     }
+    cursor_show();
 }
 
 static void print_num(unsigned long n, int base)

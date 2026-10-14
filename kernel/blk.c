@@ -278,6 +278,7 @@ void storage_init(void)
 {
     blk_init();
     nvme_init();
+    ahci_init();
 
     int disks = ndevs;
     for (int i = 0; i < disks; i++) blk_scan_partitions(i);

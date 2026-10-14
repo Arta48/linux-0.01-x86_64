@@ -54,5 +54,6 @@ void  blk_proc_dump(char *buf, uint64_t max_len);
 
 /* Драйверы накопителей */
 int   nvme_init(void);                          /* число найденных пространств имён */
+int   ahci_init(void);                          /* число найденных SATA-дисков */
 
 #endif

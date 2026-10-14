@@ -17,7 +17,7 @@ OBJS = boot/boot.o init/main.o kernel/console.o kernel/asm.o \
        kernel/traps.o mm/memory.o kernel/switch.o kernel/sched.o \
        kernel/gdt.o kernel/syscall.o kernel/keyboard.o kernel/fork.o \
        kernel/syscall_entry.o kernel/time.o kernel/hd.o kernel/smp.o kernel/trampoline.o \
-       kernel/kthread.o kernel/pci.o kernel/blk.o kernel/nvme.o kernel/acpi.o kernel/xhci.o kernel/usb_kbd.o kernel/hid_parse.o kernel/e1000.o kernel/net.o kernel/net_stack.o \
+       kernel/kthread.o kernel/pci.o kernel/blk.o kernel/nvme.o kernel/ahci.o kernel/acpi.o kernel/xhci.o kernel/usb_kbd.o kernel/hid_parse.o kernel/e1000.o kernel/net.o kernel/net_stack.o \
        fs/buffer.o fs/minix.o fs/ramfs.o fs/pipe.o lib/string.o
 
 USER_BINARIES = rootfs/bin/sh rootfs/bin/hello rootfs/bin/calc rootfs/bin/test_ulibc \
@@ -184,6 +184,9 @@ kernel/blk.o: kernel/blk.c include/linux/blkdev.h
 
 kernel/nvme.o: kernel/nvme.c include/linux/blkdev.h
 	$(CC) $(CFLAGS) -c kernel/nvme.c -o kernel/nvme.o
+
+kernel/ahci.o: kernel/ahci.c include/linux/blkdev.h
+	$(CC) $(CFLAGS) -c kernel/ahci.c -o kernel/ahci.o
 
 kernel/acpi.o: kernel/acpi.c include/linux/acpi.h
 	$(CC) $(CFLAGS) -c kernel/acpi.c -o kernel/acpi.o
