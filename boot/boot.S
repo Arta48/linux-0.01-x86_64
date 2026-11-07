@@ -64,18 +64,18 @@ _start:
 
     /* 1. Настройка 4-уровневых таблиц страниц (1 ГБ identity mapped) */
     movl $pdpt_table, %eax
-    orl  $0x7, %eax
+    orl  $0x3, %eax
     movl %eax, pml4_table
 
     movl $pd_table, %eax
-    orl  $0x7, %eax
+    orl  $0x3, %eax
     movl %eax, pdpt_table
 
     movl $0, %ecx
 set_pd_entries:
     movl $0x200000, %eax
     mull %ecx
-    orl  $0x87, %eax
+    orl  $0x83, %eax           /* Present|Writable|PS, БЕЗ User: ядро недоступно из Ring 3 */
     movl %eax, pd_table(, %ecx, 8)
     incl %ecx
     cmpl $512, %ecx
@@ -103,7 +103,7 @@ set_pd_entries:
 
     /* 5. Включаем пейджинг в CR0 */
     movl %cr0, %eax
-    orl  $(1 << 31) | (1 << 0), %eax
+    orl  $(1 << 31) | (1 << 16) | (1 << 0), %eax   /* PG | WP | PE */
     movl %eax, %cr0
 
     /* 6. Загружаем временную GDT и прыгаем в 64-битный режим */
@@ -130,23 +130,29 @@ uefi_entry:
 
     /* 3. Настройка таблиц страниц ядра (1 ГБ identity map) на чистом x86_64 */
     leaq pdpt_table(%rip), %rax
-    orq  $0x7, %rax
+    orq  $0x3, %rax
     movq %rax, pml4_table(%rip)
 
     leaq pd_table(%rip), %rax
-    orq  $0x7, %rax
+    orq  $0x3, %rax
     movq %rax, pdpt_table(%rip)
 
     xorq %rcx, %rcx
 1:
     movq %rcx, %rax
     shlq $21, %rax              /* 2MB huge pages */
-    orq  $0x87, %rax            /* Present | Writable | PageSize(2MB) */
+    orq  $0x83, %rax            /* Present | Writable | PageSize(2MB), без User */
     leaq pd_table(%rip), %rdx
     movq %rax, (%rdx, %rcx, 8)
     incq %rcx
     cmpq $512, %rcx
     jne  1b
+
+    /* CR0.WP: ядро тоже подчиняется запрету записи (иначе его запись в COW-страницу
+     * процесса молча портила бы общую страницу родителя) */
+    movq %cr0, %rax
+    orq  $(1 << 16), %rax
+    movq %rax, %cr0
 
     /* 4. Загружаем CR3 ядра */
     leaq pml4_table(%rip), %rax

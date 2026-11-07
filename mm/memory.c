@@ -13,7 +13,7 @@ static uint64_t low_mem = 0;
 static uint64_t high_mem = HIGH_MEMORY;
 static uint32_t paging_pages = 0;
 
-#define MAX_PAGING_PAGES 32768
+#define MAX_PAGING_PAGES 262144   /* до 1 ГБ (identity-map) */
 static uint16_t mem_map[MAX_PAGING_PAGES];
 
 static inline void invlpg(uint64_t addr)
@@ -26,6 +26,30 @@ static inline uint64_t *get_current_pml4(void)
     uint64_t cr3;
     __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
     return (uint64_t *)(cr3 & ~0xFFFULL);
+}
+
+/* Общие каталоги страниц окна MMIO (PDPT[2..63]): создаются заранее и копируются
+ * в PML4 каждого процесса, поэтому mapping устройства, сделанный в любом
+ * контексте, виден всем. */
+static uint64_t kio_next = KIO_BASE;
+
+void kernel_mmio_init(void)
+{
+    extern char pdpt_table[];
+    extern char pml4_table[];
+    /* PML4[511]: общая область ioremap (для BAR выше 64 ГБ) */
+    uint64_t *boot_pml4 = (uint64_t *)pml4_table;
+    if (!(boot_pml4[511] & PTE_PRESENT)) {
+        uint64_t pdpt = get_free_page();
+        if (pdpt) boot_pml4[511] = pdpt | PTE_PRESENT | PTE_WRITABLE;
+    }
+    uint64_t *boot_pdpt = (uint64_t *)pdpt_table;
+    for (int i = KMMIO_PDPT_FIRST; i <= KMMIO_PDPT_LAST; i++) {
+        if (boot_pdpt[i] & PTE_PRESENT) continue;
+        uint64_t pd = get_free_page();
+        if (!pd) break;
+        boot_pdpt[i] = pd | PTE_PRESENT | PTE_WRITABLE;
+    }
 }
 
 void mem_init(uint64_t reserve_end, uint64_t limit)
@@ -60,6 +84,7 @@ void mem_init(uint64_t reserve_end, uint64_t limit)
         mem_map[i] = 0;
     }
 
+    kernel_mmio_init();
     printk("[OK] Memory Manager: low_mem = %p, high_mem = %p\n", low_mem, high_mem);
     printk("[OK] Free Physical Pages: %d (%d MB free for allocation)\n",
            paging_pages, (paging_pages * PAGE_SIZE) / (1024 * 1024));
@@ -196,102 +221,152 @@ uint64_t create_process_pml4(void)
     uint64_t *pml4 = (uint64_t *)pml4_phys;
     uint64_t *pdpt = (uint64_t *)pdpt_phys;
 
-    /* PML4[0] указывает на персональную PDPT процесса */
+    /* PML4[0] -> персональная PDPT процесса. Бит U нужен на всех уровнях, чтобы
+     * пользователь вообще мог обращаться к страницам под PDPT[1], [2] и т. д. */
     pml4[0] = pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 
-    /* PDPT[0] указывает на общую таблицу ядра pd_table (0..1 ГБ identity map) */
-    pdpt[0] = (uint64_t)pd_table | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+    /* PDPT[0] -> общая таблица ядра pd_table (0..1 ГБ identity map).
+     * БЕЗ бита U: ядро недоступно из Ring 3 (раньше было 0x87 -- любая
+     * пользовательская программа могла читать и портить память ядра). */
+    pdpt[0] = (uint64_t)pd_table | PTE_PRESENT | PTE_WRITABLE;
 
-    /* Отображаем устройства ядра (Local APIC 0xFEE00000 в PDPT[3]) во все процессы */
+    /* Устройства ядра (Local APIC 0xFEE00000, MMIO NVMe/AHCI в PDPT[3]) --
+     * общие для всех процессов, только supervisor. */
     extern char pdpt_table[];
     uint64_t *boot_pdpt = (uint64_t *)pdpt_table;
-    pdpt[3] = boot_pdpt[3];
+    for (int i = KMMIO_PDPT_FIRST; i <= KMMIO_PDPT_LAST; i++) pdpt[i] = boot_pdpt[i];
+
+    extern char pml4_table[];
+    pml4[511] = ((uint64_t *)pml4_table)[511];
 
     return pml4_phys;
+}
+
+/* Страница PTE принадлежит пулу? Тогда у неё есть счётчик ссылок */
+static inline int page_in_pool(uint64_t phys)
+{
+    return phys >= low_mem && phys < high_mem;
+}
+
+/* Обход пользовательских PTE: cb вызывается для каждой присутствующей
+ * пользовательской страницы. PML4[0] -> только PDPT[1..511] без [3] (ядро/MMIO). */
+typedef int (*pte_cb)(uint64_t virt, uint64_t *pte, void *arg);
+
+static int walk_user(uint64_t *pml4, pte_cb cb, void *arg, int free_tables)
+{
+    for (uint64_t i4 = 0; i4 < 256; i4++) {          /* нижняя половина адресов */
+        if (!(pml4[i4] & PTE_PRESENT)) continue;
+        uint64_t *pdpt = (uint64_t *)(pml4[i4] & 0x000FFFFFFFFFF000ULL);
+        for (uint64_t i3 = (i4 == 0 ? 1 : 0); i3 < 512; i3++) {
+            if (i4 == 0 && i3 != 1) continue;        /* кроме 1..2 ГБ -- ядро и MMIO */
+            if (!(pdpt[i3] & PTE_PRESENT)) continue;
+            uint64_t *pd = (uint64_t *)(pdpt[i3] & 0x000FFFFFFFFFF000ULL);
+            for (uint64_t i2 = 0; i2 < 512; i2++) {
+                if (!(pd[i2] & PTE_PRESENT)) continue;
+                uint64_t *pt = (uint64_t *)(pd[i2] & 0x000FFFFFFFFFF000ULL);
+                for (uint64_t i1 = 0; i1 < 512; i1++) {
+                    if (!(pt[i1] & PTE_PRESENT)) continue;
+                    uint64_t virt = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
+                    if (cb(virt, &pt[i1], arg) < 0) return -1;
+                }
+                if (free_tables) free_page((uint64_t)pt);
+            }
+            if (free_tables) free_page((uint64_t)pd);
+        }
+        if (free_tables && i4 != 0) free_page((uint64_t)pdpt);
+    }
+    return 0;
+}
+
+struct cow_ctx { uint64_t *child; };
+
+static int cow_cb(uint64_t virt, uint64_t *pte, void *arg)
+{
+    struct cow_ctx *c = (struct cow_ctx *)arg;
+    uint64_t phys = *pte & 0x000FFFFFFFFFF000ULL;
+    uint64_t flags = *pte & 0xFFF;
+
+    /* Copy-On-Write: записываемую страницу помечаем PTE_COW и закрываем на запись
+     * у обоих процессов. Уже только читаемые страницы просто разделяются. */
+    if (flags & PTE_WRITABLE) {
+        flags = (flags & ~PTE_WRITABLE) | PTE_COW;
+        *pte = phys | flags;
+        invlpg(virt);
+    }
+    if (page_in_pool(phys)) {
+        mem_map[(phys - low_mem) / PAGE_SIZE]++;
+    }
+    if (map_page(c->child, virt, phys, flags) < 0) return -1;
+    return 0;
 }
 
 uint64_t copy_process_pml4(uint64_t parent_pml4)
 {
     uint64_t child_pml4_phys = create_process_pml4();
     if (!child_pml4_phys) return 0;
+    if (!parent_pml4) return child_pml4_phys;
 
-    if (!parent_pml4) {
-        return child_pml4_phys;
+    struct cow_ctx ctx = { (uint64_t *)child_pml4_phys };
+    if (walk_user((uint64_t *)parent_pml4, cow_cb, &ctx, 0) < 0) {
+        free_process_pml4(child_pml4_phys);
+        return 0;
     }
-
-    uint64_t *p_pml4 = (uint64_t *)parent_pml4;
-    if (!(p_pml4[0] & PTE_PRESENT)) return child_pml4_phys;
-
-    uint64_t *p_pdpt = (uint64_t *)(p_pml4[0] & ~0xFFFULL);
-
-    /* Обходим только пользовательские диапазоны (PDPT[1..511], от 1 ГБ) */
-    for (uint64_t pdpt_idx = 1; pdpt_idx < 512; pdpt_idx++) {
-        if (pdpt_idx == 3) continue; /* Пропускаем системный APIC */
-        if (!(p_pdpt[pdpt_idx] & PTE_PRESENT)) continue;
-
-        uint64_t *p_pd = (uint64_t *)(p_pdpt[pdpt_idx] & ~0xFFFULL);
-        for (uint64_t pd_idx = 0; pd_idx < 512; pd_idx++) {
-            if (!(p_pd[pd_idx] & PTE_PRESENT)) continue;
-
-            uint64_t *p_pt = (uint64_t *)(p_pd[pd_idx] & ~0xFFFULL);
-            for (uint64_t pt_idx = 0; pt_idx < 512; pt_idx++) {
-                if (!(p_pt[pt_idx] & PTE_PRESENT)) continue;
-
-                uint64_t parent_phys = p_pt[pt_idx] & ~0xFFFULL;
-                uint64_t flags = p_pt[pt_idx] & 0xFFFULL;
-
-                uint64_t virt = (pdpt_idx << 30) | (pd_idx << 21) | (pt_idx << 12);
-
-                /* Механизм Copy-On-Write (COW):
-                 * Сбрасываем флаг записи у родителя и ребенка, увеличиваем счетчик ссылок */
-                flags &= ~PTE_WRITABLE;
-                p_pt[pt_idx] = (parent_phys & ~0xFFFULL) | flags | PTE_PRESENT;
-                invlpg(virt);
-
-                /* Увеличиваем счетчик ссылок на физическую страницу в mem_map */
-                if (parent_phys >= low_mem && parent_phys < high_mem) {
-                    uint32_t idx = (parent_phys - low_mem) / PAGE_SIZE;
-                    mem_map[idx]++;
-                }
-
-                map_page((uint64_t *)child_pml4_phys, virt, parent_phys, flags);
-            }
-        }
-    }
-
     return child_pml4_phys;
+}
+
+static int free_cb(uint64_t virt, uint64_t *pte, void *arg)
+{
+    (void)virt; (void)arg;
+    free_page(*pte & 0x000FFFFFFFFFF000ULL);
+    *pte = 0;
+    return 0;
 }
 
 void free_process_pml4(uint64_t pml4_phys)
 {
     if (!pml4_phys) return;
-
     uint64_t *pml4 = (uint64_t *)pml4_phys;
+
+    walk_user(pml4, free_cb, NULL, 1);
+
+    /* PDPT[0] процесса (персональная; pd_table внутри неё общая -- не трогаем) */
     if (pml4[0] & PTE_PRESENT) {
-        uint64_t *pdpt = (uint64_t *)(pml4[0] & ~0xFFFULL);
-
-        /* pdpt[0] - это общая таблица ядра, ее НЕ освобождаем! */
-        for (uint64_t pdpt_idx = 1; pdpt_idx < 512; pdpt_idx++) {
-            if (pdpt_idx == 3) continue; /* Не трогаем системный APIC */
-            if (!(pdpt[pdpt_idx] & PTE_PRESENT)) continue;
-
-            uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
-            for (uint64_t pd_idx = 0; pd_idx < 512; pd_idx++) {
-                if (!(pd[pd_idx] & PTE_PRESENT)) continue;
-
-                uint64_t *pt = (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
-                for (uint64_t pt_idx = 0; pt_idx < 512; pt_idx++) {
-                    if (!(pt[pt_idx] & PTE_PRESENT)) continue;
-                    uint64_t phys_page = pt[pt_idx] & ~0xFFFULL;
-                    free_page(phys_page);
-                }
-                free_page((uint64_t)pt);
-            }
-            free_page((uint64_t)pd);
-        }
-        free_page((uint64_t)pdpt);
+        free_page(pml4[0] & 0x000FFFFFFFFFF000ULL);
     }
     free_page(pml4_phys);
+}
+
+/* Снять отображение одной пользовательской страницы (освободить кадр) */
+int unmap_user_page(uint64_t *pml4, uint64_t virt)
+{
+    uint64_t i4 = (virt >> 39) & 0x1FF, i3 = (virt >> 30) & 0x1FF;
+    uint64_t i2 = (virt >> 21) & 0x1FF, i1 = (virt >> 12) & 0x1FF;
+    if (!(pml4[i4] & PTE_PRESENT)) return 0;
+    uint64_t *pdpt = (uint64_t *)(pml4[i4] & 0x000FFFFFFFFFF000ULL);
+    if (!(pdpt[i3] & PTE_PRESENT)) return 0;
+    uint64_t *pd = (uint64_t *)(pdpt[i3] & 0x000FFFFFFFFFF000ULL);
+    if (!(pd[i2] & PTE_PRESENT)) return 0;
+    uint64_t *pt = (uint64_t *)(pd[i2] & 0x000FFFFFFFFFF000ULL);
+    if (!(pt[i1] & PTE_PRESENT)) return 0;
+    free_page(pt[i1] & 0x000FFFFFFFFFF000ULL);
+    pt[i1] = 0;
+    invlpg(virt);
+    return 1;
+}
+
+/* Найти PTE пользовательской страницы (NULL, если таблиц нет) */
+uint64_t *lookup_pte(uint64_t *pml4, uint64_t virt)
+{
+    uint64_t i4 = (virt >> 39) & 0x1FF, i3 = (virt >> 30) & 0x1FF;
+    uint64_t i2 = (virt >> 21) & 0x1FF, i1 = (virt >> 12) & 0x1FF;
+    if (!(pml4[i4] & PTE_PRESENT)) return NULL;
+    uint64_t *pdpt = (uint64_t *)(pml4[i4] & 0x000FFFFFFFFFF000ULL);
+    if (!(pdpt[i3] & PTE_PRESENT)) return NULL;
+    uint64_t *pd = (uint64_t *)(pdpt[i3] & 0x000FFFFFFFFFF000ULL);
+    if (!(pd[i2] & PTE_PRESENT)) return NULL;
+    if (pd[i2] & (1ULL << 7)) return NULL;           /* 2 МБ страница ядра */
+    uint64_t *pt = (uint64_t *)(pd[i2] & 0x000FFFFFFFFFF000ULL);
+    return &pt[i1];
 }
 
 uint32_t get_free_pages_count(void)
@@ -310,57 +385,70 @@ uint32_t get_total_pages_count(void)
 
 int do_wp_page(uint64_t *pte, uint64_t addr)
 {
-    uint64_t old_page = *pte & ~0xFFFULL;
-    uint32_t idx = (old_page >= low_mem && old_page < high_mem) ? (old_page - low_mem) / PAGE_SIZE : 0;
+    uint64_t old_page = *pte & 0x000FFFFFFFFFF000ULL;
+    uint32_t idx = page_in_pool(old_page) ? (old_page - low_mem) / PAGE_SIZE : 0;
+    uint64_t keep = (*pte & 0xFFF) & ~PTE_COW;
 
-    /* Если страницу больше никто не делит — просто возвращаем права на запись */
-    if (mem_map[idx] <= 1) {
-        *pte |= PTE_WRITABLE;
+    /* Если страницу больше никто не делит -- просто возвращаем право записи */
+    if (page_in_pool(old_page) && mem_map[idx] <= 1) {
+        *pte = old_page | keep | PTE_WRITABLE | PTE_PRESENT;
         invlpg(addr);
         return 0;
     }
 
-    /* Иначе выделяем приватную копию страницы для пишущего процесса */
+    /* Иначе приватная копия страницы для пишущего процесса */
     uint64_t new_page = get_free_page();
     if (!new_page) return -1;
 
     memcpy((void *)new_page, (void *)old_page, PAGE_SIZE);
-    mem_map[idx]--;
+    if (page_in_pool(old_page) && mem_map[idx] > 0) mem_map[idx]--;
 
-    *pte = new_page | (*pte & 0xFFFULL) | PTE_WRITABLE | PTE_PRESENT;
+    *pte = new_page | keep | PTE_WRITABLE | PTE_PRESENT;
     invlpg(addr);
     return 0;
 }
 
+/* Page Fault: возвращает 0, если ошибка устранена (COW или ленивое выделение).
+ * Иначе -1 -- вызывающий завершит процесс (SIGSEGV) или остановит ядро. */
 int do_page_fault(struct trap_frame *tf)
 {
     uint64_t cr2;
     __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 
-    /* Бит 1 (0x02) в error_code означает попытку записи */
-    if (tf->error_code & 0x02) {
-        uint64_t cr3;
-        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-        uint64_t *pml4 = (uint64_t *)(cr3 & ~0xFFFULL);
+    if (cr2 < USER_VA_MIN || cr2 >= USER_VA_MAX) return -1;
 
-        uint64_t pml4_idx = (cr2 >> 39) & 0x1FF;
-        uint64_t pdpt_idx = (cr2 >> 30) & 0x1FF;
-        uint64_t pd_idx   = (cr2 >> 21) & 0x1FF;
-        uint64_t pt_idx   = (cr2 >> 12) & 0x1FF;
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *pml4 = (uint64_t *)(cr3 & ~0xFFFULL);
+    uint64_t err = tf->error_code;
 
-        if (pml4[pml4_idx] & PTE_PRESENT) {
-            uint64_t *pdpt = (uint64_t *)(pml4[pml4_idx] & ~0xFFFULL);
-            if (pdpt[pdpt_idx] & PTE_PRESENT) {
-                uint64_t *pd = (uint64_t *)(pdpt[pdpt_idx] & ~0xFFFULL);
-                if (pd[pd_idx] & PTE_PRESENT) {
-                    uint64_t *pt = (uint64_t *)(pd[pd_idx] & ~0xFFFULL);
-                    /* Страница присутствует в памяти, но закрыта для записи — это COW */
-                    if ((pt[pt_idx] & PTE_PRESENT) && !(pt[pt_idx] & PTE_WRITABLE)) {
-                        return do_wp_page(&pt[pt_idx], cr2);
-                    }
-                }
-            }
+    uint64_t *pte = lookup_pte(pml4, cr2);
+    if ((err & 1) && pte && (*pte & PTE_PRESENT)) {
+        /* Защитное нарушение на присутствующей странице: допустим только COW */
+        if ((err & 2) && (*pte & PTE_COW)) {
+            return do_wp_page(pte, cr2);
         }
+        return -1;
     }
-    return -1;
+
+    /* Страница отсутствует: ленивое выделение по VMA */
+    extern struct task_struct *current;
+    return vma_handle_fault(current, cr2, err);
+}
+
+void *mmio_map(uint64_t phys, uint64_t size, uint64_t pte_flags)
+{
+    uint64_t off = phys & (PAGE_SIZE - 1);
+    uint64_t base = phys - off;
+    uint64_t pages = (size + off + PAGE_SIZE - 1) / PAGE_SIZE;
+    int identity = mmio_window_ok(phys, size);
+    uint64_t va = identity ? base : kio_next;
+
+    for (uint64_t i = 0; i < pages; i++) {
+        /* ниже 1 ГБ MMIO уже покрыт identity-map ядра */
+        if (identity && base + i * PAGE_SIZE < 0x40000000ULL) continue;
+        if (map_page(NULL, va + i * PAGE_SIZE, base + i * PAGE_SIZE, pte_flags) < 0) return NULL;
+    }
+    if (!identity) kio_next += pages * PAGE_SIZE;
+    return (void *)(va + off);
 }

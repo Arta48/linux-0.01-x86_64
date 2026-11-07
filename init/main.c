@@ -20,52 +20,31 @@
 #include <asm/io.h>
 
 /* Фоновый поток ядра */
-static int kthread_heartbeat(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        for (volatile uint64_t k = 0; k < 200000000ULL; k++) {
-            __asm__ volatile ("pause");
-        }
-    }
-    return 0;
-}
+extern int64_t sys_execve_ex(const char *filename, char **argv, char **envp, struct trap_frame *tf, int from_kernel);
+extern void launch_user_frame(struct trap_frame *tf);
 
-extern void enter_user_mode(uint64_t entry_point, uint64_t user_stack);
-
-static inline int64_t sys_execve_user(const char *path, char **argv, char **envp)
-{
-    int64_t ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(11), "b"((uint64_t)path), "c"((uint64_t)argv), "d"((uint64_t)envp) : "memory");
-    return ret;
-}
-
-static inline void sys_exit_user(int status)
-{
-    __asm__ volatile ("syscall" : : "a"(1), "D"(status) : "rcx", "r11", "memory");
-    for (;;);
-}
-
-/* Task 1: Первичный процесс инициализации (Ring 3) */
-void init_process(void)
-{
-    strcpy(current->name, "init");
-    char *argv[] = { "/bin/sh", NULL };
-    char *envp[] = { "HOME=/", "PATH=/bin", NULL };
-
-    /* Запуск автономного бинарного шелла /bin/sh в Ring 3 */
-    sys_execve_user("/bin/sh", argv, envp);
-
-    /* Если запуск не удался */
-    sys_exit_user(1);
-}
-
+/* Task 3: первый пользовательский процесс. Загружаем /bin/init прямо из ядра и
+ * уходим в Ring 3 через iretq по готовому кадру (раньше в Ring 3 выполнялась
+ * функция ядра -- это невозможно при защите ядра от пользователя). */
 void user_trampoline(void)
 {
-    uint64_t stack_page = get_free_pages(8); /* 32 КБ непрерывного стека */
-    uint64_t user_stack = stack_page + (8 * PAGE_SIZE) - 16;
-    current->user_stack_page = stack_page;
-    enter_user_mode((uint64_t)init_process, user_stack);
+    struct trap_frame tf;
+    memset(&tf, 0, sizeof(tf));
+    tf.cs = 0x23;
+    tf.ss = 0x1B;
+    tf.rflags = 0x202;
+
+    strcpy(current->name, "init");
+    printk("[INIT] Task %d started, loading /bin/init...\n", (int)current->pid);
+    char *argv[] = { "/bin/init", NULL };
+    char *envp[] = { "HOME=/", "PATH=/bin", "TERM=linux", NULL };
+
+    if (sys_execve_ex("/bin/init", argv, envp, &tf, 1) < 0) {
+        printk("[INIT] cannot execute /bin/init\n");
+        sys_exit(1);
+    }
+    printk("[INIT] /bin/init loaded: entering Ring 3 rip=%p rsp=%p\n", tf.rip, tf.rsp);
+    launch_user_frame(&tf);
 }
 
 struct mb_info mbi;
@@ -95,10 +74,10 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
      * за initrd) и берём границу памяти от загрузчика, если она проверена. */
     uint64_t reserve_end = initrd_end;
     uint64_t mem_limit = HIGH_MEMORY;
-    if ((mbi.flags & MB_FLAG_UEFI) && (mbi.flags & MB_FLAG_MEM)) {
-        if (mb_info_addr + PAGE_SIZE > reserve_end) {
-            reserve_end = mb_info_addr + PAGE_SIZE;
-        }
+    if ((mbi.flags & MB_FLAG_UEFI) && (mbi.flags & MB_FLAG_MEM) && mb_info_addr + PAGE_SIZE > reserve_end) {
+        reserve_end = mb_info_addr + PAGE_SIZE;
+    }
+    if (mbi.flags & MB_FLAG_MEM) {          /* размер ОЗУ сообщает загрузчик (UEFI-загрузчик или multiboot) */
         mem_limit = 0x100000ULL + (uint64_t)mbi.mem_upper * 1024ULL;
     }
 
@@ -131,14 +110,13 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
      * прошивка перестаёт эмулировать PS/2, управление берёт ядро) */
     xhci_init();
 
-    /* На реальном железе (UEFI) пока работаем на одном ядре: все AP стартовали
-     * бы на одном общем стеке, а трамплин 0x8000 занят прошивкой. */
-    smp_init((mbi.flags & MB_FLAG_UEFI) ? 1 : 0);
+    /* SMP: AP стартуют по INIT/SIPI с отдельным стеком каждый; трамплин на
+     * UEFI лежит на странице, выделенной загрузчиком (mbi.smp_trampoline). */
+    smp_init(0);
     net_init();
     strcpy(current->name, "idle");
 
     /* Запуск фонового потока ядра */
-    kthread_create(kthread_heartbeat, NULL, "kworker");
     usb_start_thread();
 
     if (initrd_start && initrd_end) {
@@ -149,7 +127,8 @@ void main(uint64_t mb_magic, uint64_t mb_info_addr)
     root_task_pid = init_pid;
 
     __asm__ volatile ("sti");
-    printk("[OK] System Initialized. Launching /bin/sh via Task %d...\n", init_pid);
+    printk("[OK] System Initialized. Launching /bin/init via Task %d...\n", init_pid);
+    timer_selftest();
 
     for (;;) {
         __asm__ volatile ("hlt");

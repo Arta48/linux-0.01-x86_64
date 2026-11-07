@@ -25,17 +25,14 @@
 #define __NR_kill    37
 #define __NR_mkdir   39
 #define __NR_rmdir   40
-#define __NR_socket  41
 #define __NR_pipe    42
-#define __NR_accept  43
 #define __NR_sendto  44
 #define __NR_brk     45
 #define __NR_signal  48
-#define __NR_bind    49
-#define __NR_listen  50
 #define __NR_recvfrom 51
 #define __NR_uname   59
 #define __NR_reboot  88
+#define __NR_netctl  100
 #define __NR_dup2    63
 #define __NR_getcwd  79
 
@@ -76,6 +73,7 @@ static inline int64_t syscall4(uint64_t nr, uint64_t a1, uint64_t a2, uint64_t a
 }
 
 int open(const char *path, int flags) { return (int)syscall2(__NR_open, (uint64_t)path, flags); }
+int64_t netctl(int cmd, uint64_t a1, uint64_t a2, uint64_t a3) { return syscall4(__NR_netctl, cmd, a1, a2, a3); }
 int close(int fd) { return (int)syscall1(__NR_close, fd); }
 int64_t lseek(int fd, int64_t offset, int whence) { return syscall3(__NR_lseek, fd, (uint64_t)offset, whence); }
 int64_t read(int fd, void *buf, size_t count) { return syscall3(__NR_read, fd, (uint64_t)buf, count); }
@@ -111,10 +109,6 @@ int signal(int sig, void (*handler)(int)) { return (int)syscall2(__NR_signal, si
 int uname(struct utsname *name) { return (int)syscall1(__NR_uname, (uint64_t)name); }
 int sync(void) { return (int)syscall0(__NR_sync); }
 int reboot(int cmd) { return (int)syscall1(__NR_reboot, (uint64_t)cmd); }
-int socket(int domain, int type, int protocol) { return (int)syscall3(__NR_socket, domain, type, protocol); }
-int bind(int sockfd, uint16_t port) { return (int)syscall2(__NR_bind, sockfd, port); }
-int listen(int sockfd, int backlog) { return (int)syscall2(__NR_listen, sockfd, backlog); }
-int accept(int sockfd) { return (int)syscall1(__NR_accept, sockfd); }
 int64_t list(const char *path, char *buf, size_t max_len, int is_long) { return syscall4(__NR_list, (uint64_t)path, (uint64_t)buf, max_len, is_long); }
 void ps(void) { syscall0(__NR_ps); }
 void pause(void) { syscall0(__NR_pause); }
@@ -618,5 +612,21 @@ int dlclose(void *handle)
     if (!handle) return -1;
     struct dl_handle *h = (struct dl_handle *)handle;
     h->in_use = 0;
+    return 0;
+}
+
+/* "a.b.c.d" -> IP в порядке хоста; 0 = успех */
+int parse_ip(const char *s, uint32_t *out)
+{
+    uint32_t ip = 0;
+    for (int i = 0; i < 4; i++) {
+        if (*s < '0' || *s > '9') return -1;
+        uint32_t v = 0;
+        while (*s >= '0' && *s <= '9') { v = v * 10 + (uint32_t)(*s - '0'); if (v > 255) return -1; s++; }
+        ip = (ip << 8) | v;
+        if (i < 3) { if (*s != '.') return -1; s++; }
+    }
+    if (*s) return -1;
+    *out = ip;
     return 0;
 }

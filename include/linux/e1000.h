@@ -23,7 +23,7 @@
 #define E1000_REG_RAL     0x5400
 #define E1000_REG_RAH     0x5404
 
-#define E1000_NUM_RX_DESC 32
+#define E1000_NUM_RX_DESC 128
 #define E1000_NUM_TX_DESC 16
 #define E1000_BUFFER_SIZE 2048
 
@@ -47,8 +47,5 @@ struct e1000_tx_desc {
 } __attribute__((packed));
 
 int  e1000_init(void);
-void e1000_get_mac(uint8_t out_mac[6]);
-int  e1000_send(const void *data, uint16_t len);
-int  e1000_recv(void *buf, uint16_t max_len);
 
 #endif

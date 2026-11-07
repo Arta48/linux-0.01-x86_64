@@ -1024,11 +1024,10 @@ static int init_controller(const struct pci_device *pd)
     uint16_t cmd = pci_read_word(pd->bus, pd->slot, pd->func, 0x04);
     pci_write_word(pd->bus, pd->slot, pd->func, 0x04, (uint16_t)(cmd | 0x6));
 
-    /* MMIO вне identity-map ядра (1 ГБ): мапим 128 КБ как uncacheable */
-    if (addr >= 0x40000000ULL) {
-        for (uint64_t pg = 0; pg < 32; pg++)
-            map_page(NULL, addr + pg * PAGE_SIZE, addr + pg * PAGE_SIZE,
-                     PTE_WRITABLE | (3ULL << 3));
+    volatile uint8_t *xregs = (volatile uint8_t *)mmio_map(addr, 0x20000, PTE_WRITABLE | (3ULL << 3));
+    if (!xregs) {
+        printk("[USB] xHCI %d:%d: cannot map MMIO %p\n", (long)pd->bus, (long)pd->slot, addr);
+        return 0;
     }
 
     struct xhci_ctrl *c = &C[nctrl];
@@ -1036,7 +1035,7 @@ static int init_controller(const struct pci_device *pd)
     c->used = 1;
     c->bus = pd->bus; c->slot = pd->slot; c->func = pd->func;
     c->mmio = addr;
-    c->cap = (volatile uint8_t *)addr;
+    c->cap = xregs;
     c->hci_version = (uint16_t)(rd32(c->cap, 0) >> 16);
     printk("[OK] USB: xHCI controller %d:%d, MMIO %p, v%x\n",
            (long)pd->bus, (long)pd->slot, addr, (long)c->hci_version);

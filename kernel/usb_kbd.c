@@ -67,6 +67,14 @@ static void esc_seq(char c)
     keyboard_inject_char(c);
 }
 
+static void esc_tilde(char n)
+{
+    keyboard_inject_char('\033');
+    keyboard_inject_char('[');
+    keyboard_inject_char(n);
+    keyboard_inject_char('~');
+}
+
 static void emit_key(uint8_t key, uint8_t mods)
 {
     int shift = (mods & (MOD_LSHIFT | MOD_RSHIFT)) != 0;
@@ -88,13 +96,16 @@ static void emit_key(uint8_t key, uint8_t mods)
         return;
     }
     switch (key) {
-        case 0x4C: keyboard_inject_char('\b'); break;   /* Delete -> Backspace */
         case 0x4F: esc_seq('C'); break;                 /* Right */
         case 0x50: esc_seq('D'); break;                 /* Left  */
         case 0x51: esc_seq('B'); break;                 /* Down  */
         case 0x52: esc_seq('A'); break;                 /* Up    */
         case 0x4A: esc_seq('H'); break;                 /* Home  */
         case 0x4D: esc_seq('F'); break;                 /* End   */
+        case 0x49: esc_tilde('2'); break;               /* Insert */
+        case 0x4C: esc_tilde('3'); break;               /* Delete */
+        case 0x4B: esc_tilde('5'); break;               /* Page Up */
+        case 0x4E: esc_tilde('6'); break;               /* Page Down */
         /* Цифровой блок */
         case 0x54: keyboard_inject_char('/'); break;
         case 0x55: keyboard_inject_char('*'); break;

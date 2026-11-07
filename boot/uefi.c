@@ -237,7 +237,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     } else {
         uint64_t pages = (initrd_size + PG - 1) / PG;
         st = bs->AllocatePages(AllocateAddress, EfiLoaderData, pages, &initrd_addr);
-        if (st != EFI_SUCCESS) fail((const CHAR16 *)u"Cannot reserve memory for initrd", st);
+        if (st != EFI_SUCCESS) {
+            /* За ядром не хватило места (большой rootfs): берём начало самого крупного свободного
+             * участка в пределах identity-map ядра. Страница mb_info и свободная память ядра
+             * продолжаются сразу за initrd, остальное пространство просто не используется. */
+            uint64_t tmp = 0, tsz = MMAP_PAGES * PG, tkey = 0, tdesc = 0;
+            uint32_t tver = 0;
+            if (bs->AllocatePages(AllocateAnyPages, EfiLoaderData, MMAP_PAGES, &tmp) != EFI_SUCCESS ||
+                bs->GetMemoryMap(&tsz, (void *)tmp, &tkey, &tdesc, &tver) != EFI_SUCCESS)
+                fail((const CHAR16 *)u"Cannot reserve memory for initrd", st);
+            uint64_t best = 0, best_pages = 0;
+            for (uint64_t off = 0; off + tdesc <= tsz; off += tdesc) {
+                EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)(tmp + off);
+                if (d->Type != 7) continue;                        /* EfiConventionalMemory */
+                uint64_t s0 = d->PhysicalStart, e0 = s0 + d->NumberOfPages * PG;
+                if (s0 < 0x200000) s0 = 0x200000;
+                if (e0 > IDMAP_LIMIT) e0 = IDMAP_LIMIT;
+                if (e0 <= s0) continue;
+                uint64_t n = (e0 - s0) / PG;
+                if (n > best_pages) { best_pages = n; best = s0; }
+            }
+            if (best_pages < pages + 1 + 2048) fail((const CHAR16 *)u"Not enough contiguous memory for initrd", st);
+            initrd_addr = best;
+            st = bs->AllocatePages(AllocateAddress, EfiLoaderData, pages, &initrd_addr);
+            if (st != EFI_SUCCESS) fail((const CHAR16 *)u"Cannot reserve memory for initrd", st);
+        }
         if (read_exact(rf, (void *)initrd_addr, initrd_size) != 0) fail((const CHAR16 *)u"Read /rootfs.tar", 0);
         rf->Close(rf);
         cur = initrd_addr + pages * PG;
@@ -256,6 +280,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     {
         uint64_t rsdp = find_rsdp(SystemTable);
         if (rsdp && rsdp < (1ULL << 32)) mbi->config_table = (uint32_t)rsdp;
+    }
+    {
+        /* Страница под трамплин AP: SIPI запускает ядро только с адреса < 1 МБ.
+         * Выделяем у прошивки, чтобы она не занимала её под свои данные. */
+        uint64_t low = 0x9F000;
+        if (bs->AllocatePages(AllocateMaxAddress, EfiLoaderData, 1, &low) == EFI_SUCCESS &&
+            low >= 0x1000 && low < 0xA0000)
+            mbi->smp_trampoline = (uint32_t)low;
     }
     if (initrd_size) {
         mod->mod_start = (uint32_t)initrd_addr;

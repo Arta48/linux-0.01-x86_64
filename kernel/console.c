@@ -91,18 +91,32 @@ static void draw_char(char c, int cx, int cy, uint32_t fg, uint32_t bg)
  * Ячейка: младший байт -- символ, старший -- атрибуты (бит 0 = инверсия). */
 #define CON_MAX_COLS 320
 #define CON_MAX_ROWS 160
+/* Ячейка: бит 0-7 символ, бит 8 инверсия, 9-13 цвет текста (0 = по умолчанию, иначе 1+индекс 0..15),
+ * 14-18 цвет фона (так же) */
 #define ATTR_REV   0x100
-#define SHOWN_NONE 0xFFFF
-static uint16_t cells[CON_MAX_ROWS][CON_MAX_COLS]; /* что должно быть на экране */
-static uint16_t shown[CON_MAX_ROWS][CON_MAX_COLS]; /* что реально нарисовано     */
+#define ATTR_FG(v) (((v) >> 9) & 31)
+#define ATTR_BG(v) (((v) >> 14) & 31)
+#define SHOWN_NONE 0xFFFFFFFFU
+typedef uint32_t cell_t;
+static cell_t cells[CON_MAX_ROWS][CON_MAX_COLS];   /* что должно быть на экране */
+static cell_t shown[CON_MAX_ROWS][CON_MAX_COLS];   /* что реально нарисовано     */
+
+/* Палитра ANSI: 0-7 обычные, 8-15 яркие (как у VGA) */
+static const uint32_t ansi_rgb[16] = {
+    0x000000, 0xAA0000, 0x00AA00, 0xAA5500, 0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
+    0x555555, 0xFF5555, 0x55FF55, 0xFFFF55, 0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+};
 static int con_cols = 0;
 static int con_rows = 0;
-static uint16_t cur_attr = 0;       /* текущие атрибуты вывода (ESC[..m) */
+static cell_t cur_attr = 0;
+static int sgr_bold = 0;       /* текущие атрибуты вывода (ESC[..m) */
 static int cursor_drawn = 0;        /* курсор сейчас нарисован на экране */
 
-static void draw_cell(uint16_t v, int cx, int cy)
+static void draw_cell(cell_t v, int cx, int cy)
 {
     uint32_t fg = current_fg, bg = current_bg;
+    if (ATTR_FG(v)) fg = ansi_rgb[ATTR_FG(v) - 1];
+    if (ATTR_BG(v)) bg = ansi_rgb[ATTR_BG(v) - 1];
     if (v & ATTR_REV) { fg = current_bg; bg = current_fg; }
     draw_char((char)(v & 0xFF), cx, cy, fg, bg);
 }
@@ -110,7 +124,7 @@ static void draw_cell(uint16_t v, int cx, int cy)
 static void put_cell(char c, int cx, int cy)
 {
     if (cx < 0 || cy < 0 || cx >= con_cols || cy >= con_rows) return;
-    uint16_t v = (uint16_t)((unsigned char)c | cur_attr);
+    cell_t v = (cell_t)((unsigned char)c | cur_attr);
     cells[cy][cx] = v;
     if (shown[cy][cx] != v) {
         shown[cy][cx] = v;
@@ -139,7 +153,7 @@ static void cursor_hide(void)
     if (!cursor_drawn) return;
     cursor_drawn = 0;
     if (cursor_x < con_cols && cursor_y < con_rows) {
-        uint16_t v = cells[cursor_y][cursor_x];
+        cell_t v = cells[cursor_y][cursor_x];
         shown[cursor_y][cursor_x] = v;
         draw_cell(v, cursor_x, cursor_y);
     }
@@ -148,7 +162,7 @@ static void cursor_hide(void)
 static void cursor_show(void)
 {
     if (cursor_x >= con_cols || cursor_y >= con_rows) return;
-    uint16_t v = cells[cursor_y][cursor_x] ^ ATTR_REV;
+    cell_t v = cells[cursor_y][cursor_x] ^ ATTR_REV;
     shown[cursor_y][cursor_x] = SHOWN_NONE;  /* при любом обновлении перерисуется */
     draw_cell(v, cursor_x, cursor_y);
     cursor_drawn = 1;
@@ -187,6 +201,19 @@ static void fb_clear(void)
     cursor_drawn = 0;
 }
 
+void console_get_size(int *cols, int *rows);
+void console_get_geometry(int *w, int *h, int *cols, int *rows)
+{
+    *w = (int)fb_width; *h = (int)fb_height;
+    console_get_size(cols, rows);
+}
+
+void console_get_size(int *cols, int *rows)
+{
+    *cols = con_cols > 0 ? con_cols : 80;
+    *rows = con_rows > 0 ? con_rows : 25;
+}
+
 void console_init(void)
 {
     /* Инициализация фреймбуфера из параметров UEFI */
@@ -203,13 +230,11 @@ void console_init(void)
 
         /* Проецируем физическую видеопамять в ядро */
         uint64_t fb_phys = mbi.framebuffer_addr;
-        uint64_t fb_size = fb_height * fb_pitch;
-        uint64_t pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
-
-        for (uint64_t p = 0; p < pages; p++) {
-            map_page(NULL, fb_phys + (p * PAGE_SIZE), fb_phys + (p * PAGE_SIZE), PTE_WRITABLE);
-        }
-        fb = (uint32_t *)fb_phys;
+        uint64_t fb_size = (uint64_t)fb_height * fb_pitch;
+        /* mmio_map: identity в окне 2-64 ГБ, иначе ioremap в PML4[511] --
+         * обе области общие для всех адресных пространств процессов */
+        fb = (uint32_t *)mmio_map(fb_phys, fb_size, PTE_WRITABLE);
+        if (!fb) return;
         fb_clear();
     }
 }
@@ -284,9 +309,20 @@ static void csi_exec(char f)
     case 'm':
         for (int i = 0; i <= esc_np; i++) {
             int v = esc_have[i] ? esc_par[i] : 0;
-            if (v == 0 || v == 27) cur_attr = 0;
-            else if (v == 7) cur_attr = ATTR_REV;
-            /* остальные атрибуты (цвета, жирный) пока не поддерживаются */
+            cell_t fg = ATTR_FG(cur_attr), bg = ATTR_BG(cur_attr);
+            if (v == 0) { cur_attr = 0; sgr_bold = 0; continue; }
+            if (v == 1) { sgr_bold = 1; if (fg >= 1 && fg <= 8) fg += 8; }
+            else if (v == 22) { sgr_bold = 0; if (fg >= 9) fg -= 8; }
+            else if (v == 7) { cur_attr |= ATTR_REV; continue; }
+            else if (v == 27) { cur_attr &= ~(cell_t)ATTR_REV; continue; }
+            else if (v >= 30 && v <= 37) fg = 1 + (v - 30) + (sgr_bold ? 8 : 0);
+            else if (v == 39) fg = 0;
+            else if (v >= 40 && v <= 47) bg = 1 + (v - 40);
+            else if (v == 49) bg = 0;
+            else if (v >= 90 && v <= 97) fg = 1 + 8 + (v - 90);
+            else if (v >= 100 && v <= 107) bg = 1 + 8 + (v - 100);
+            else continue;
+            cur_attr = (cur_attr & ATTR_REV) | (fg << 9) | (bg << 14);
         }
         break;
     case 's': saved_x = cursor_x; saved_y = cursor_y; break;
@@ -321,25 +357,39 @@ static void esc_feed(char c)
     }
 }
 
+/* Журнал ядра для dmesg: копия всего, что вывел printk */
+#define KLOG_SIZE 16384
+static char klog_buf[KLOG_SIZE];
+static unsigned klog_head, klog_len;
+static int klog_active;
+
+int klog_read(char *dst, int max)
+{
+    int n = (int)klog_len < max ? (int)klog_len : max;
+    unsigned start = (klog_head + KLOG_SIZE - klog_len + (klog_len - (unsigned)n)) % KLOG_SIZE;
+    for (int i = 0; i < n; i++) dst[i] = klog_buf[(start + (unsigned)i) % KLOG_SIZE];
+    return n;
+}
+
 void console_putc(char c)
 {
-    if (c == '\b' || c == 127) {
-        /* В терминале QEMU (COM1): возврат влево, пробел, возврат влево */
+    if (klog_active) {
+        klog_buf[klog_head] = c;
+        klog_head = (klog_head + 1) % KLOG_SIZE;
+        if (klog_len < KLOG_SIZE) klog_len++;
+    }
+    if (c == '\b') {
+        /* Как в настоящем терминале: только сдвиг курсора влево, символ не стирается
+         * (стирание "\b \b" делают программы, например tty_echo_erase и readline). */
         serial_out('\b');
-        serial_out(' ');
-        serial_out('\b');
-
-        /* На экране (Framebuffer) */
         if (fb && cursor_x > 0) {
             cursor_hide();
             cursor_x--;
-            uint16_t keep = cur_attr; cur_attr = 0;
-            put_cell(' ', cursor_x, cursor_y);
-            cur_attr = keep;
             cursor_show();
         }
         return;
     }
+    if (c == 127) return;               /* DEL не отображается */
 
     /* Пишем в COM1 (терминал QEMU сам разбирает ESC-последовательности) */
     serial_out(c);
@@ -395,6 +445,7 @@ void printk(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
+    klog_active = 1;
     for (const char *p = fmt; *p != '\0'; p++) {
         if (*p != '%') { console_putc(*p); continue; }
         p++;
@@ -418,5 +469,6 @@ void printk(const char *fmt, ...)
             default: console_putc(*p); break;
         }
     }
+    klog_active = 0;
     va_end(args);
 }

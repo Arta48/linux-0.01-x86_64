@@ -308,18 +308,10 @@ static int hba_init(const struct pci_device *pd)
 
     uint64_t abar = pci_read_dword(pd->bus, pd->slot, pd->func, 0x24) & 0xFFFFFFF0U;
     if (!abar) { printk("[AHCI] %x:%x.%d: ABAR not assigned\n", (long)pd->bus, (long)pd->slot, (long)pd->func); return 0; }
-    if (!(abar < 0x40000000ULL || (abar >= 0xC0000000ULL && abar + 0x3000 <= 0x100000000ULL))) {
-        printk("[AHCI] %x:%x.%d: ABAR %p is outside the shared 3-4 GB window, skipped\n",
-               (long)pd->bus, (long)pd->slot, (long)pd->func, abar);
-        return 0;
-    }
     uint16_t cmd = pci_read_word(pd->bus, pd->slot, pd->func, 0x04);
     pci_write_word(pd->bus, pd->slot, pd->func, 0x04, (uint16_t)(cmd | 0x0406));
-    if (abar >= 0x40000000ULL) {
-        for (uint64_t pg = 0; pg < 3; pg++)
-            map_page(NULL, abar + pg * PAGE_SIZE, abar + pg * PAGE_SIZE, PTE_WRITABLE | (3ULL << 3));
-    }
-    h->regs = (volatile uint8_t *)abar;
+    h->regs = (volatile uint8_t *)mmio_map(abar, 0x3000, PTE_WRITABLE | (3ULL << 3));
+    if (!h->regs) { printk("[AHCI] %x:%x.%d: cannot map ABAR %p\n", (long)pd->bus, (long)pd->slot, (long)pd->func, abar); return 0; }
 
     uint32_t cap = hr32(h, HBA_CAP);
     if (cap == 0xFFFFFFFFU) { printk("[AHCI] %d: registers read as all-ones\n", (long)h->idx); return 0; }

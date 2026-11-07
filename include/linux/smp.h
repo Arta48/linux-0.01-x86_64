@@ -18,6 +18,8 @@
 #define LAPIC_ICR_LOW    0x0300
 #define LAPIC_ICR_HIGH   0x0310
 #define LAPIC_TIMER      0x0320
+#define LAPIC_LINT0      0x0350
+#define LAPIC_LINT1      0x0360
 #define LAPIC_TICR       0x0380
 #define LAPIC_TCCR       0x0390
 #define LAPIC_TDCR       0x03E0
@@ -35,5 +37,8 @@ void smp_init(int bsp_only);
 void lapic_init(void);
 uint32_t smp_get_cpu_id(void);
 void ap_startup(void);
+void lapic_eoi(void);
+void timer_selftest(void);
+extern volatile int lapic_tick_mode;   /* 1 = системный тик идёт от LAPIC timer */
 
 #endif

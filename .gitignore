@@ -10,7 +10,10 @@ disk.img
 usbdisk.img
 BOOTX64.EFI
 liveusb.img
+rootfs/lib/
 tools/mkefi
+rootfs/bin/
+*.d
 tools/mkesp
 boot/uefi.bin
 

@@ -4,9 +4,9 @@
 #include <linux/types.h>
 #include <linux/stat.h>
 
-#define NR_OPEN       16
+#define NR_OPEN       64
 #define MAX_FILENAME  80
-#define MAX_FILES     128
+#define MAX_FILES     1024
 #define PIPE_BUF_SIZE 4064
 
 #define FILE_TYPE_REGULAR 1
@@ -14,6 +14,9 @@
 #define FILE_TYPE_BLOCK   3
 #define FILE_TYPE_MINIX   4
 #define FILE_TYPE_SOCKET  5
+#define FILE_TYPE_TTY     6   /* консоль/клавиатура (fd 0..2 Linux-процессов) */
+#define FILE_TYPE_DEV     7   /* /dev/null, zero, tty, urandom: sock_id = вид */
+#define FILE_TYPE_DIR     8   /* открытый каталог: path + pos = число прочитанных записей */
 
 #define O_RDONLY  00
 #define O_WRONLY  01
@@ -66,6 +69,7 @@ struct file {
     uint32_t minix_ino;
     int sock_id;           /* Индекс сокета TCP для FILE_TYPE_SOCKET */
     int in_use;
+    char path[64];         /* полный путь (для fstat/getdents/fchdir) */
 };
 
 void fs_init(void);
@@ -91,6 +95,9 @@ int64_t sys_pipe(int *pipefd);
 int64_t pipe_read(struct file *f, char *buf, uint64_t count);
 int64_t pipe_write(struct file *f, const char *buf, uint64_t count);
 
+void fs_resolve_path(const char *in, char *out);
+int  fs_rename(const char *from, const char *to);
+int  fs_truncate_path(const char *path, uint64_t len);
 const char *fs_get_file_data(const char *name, uint64_t *out_size);
 
 #endif

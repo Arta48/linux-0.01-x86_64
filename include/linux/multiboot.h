@@ -46,6 +46,8 @@ struct mb_info {
     uint32_t framebuffer_height;
     uint8_t  framebuffer_bpp;
     uint8_t  framebuffer_type;
+    uint8_t  reserved_fb[3];
+    uint32_t smp_trampoline;   /* UEFI: страница < 1 МБ под трамплин AP (0 = нет) */
 } __attribute__((packed));
 
 struct tar_header {

@@ -1,4 +1,5 @@
 #include <linux/e1000.h>
+#include <linux/nic.h>
 #include <linux/pci.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
@@ -25,16 +26,25 @@ static inline uint32_t mmio_read32(uint32_t reg)
     return e1000_mmio[reg >> 2];
 }
 
-void e1000_get_mac(uint8_t out_mac[6])
+static int e1000_send(const void *data, uint16_t len);
+static int e1000_recv(void *buf, uint16_t max_len);
+
+static int e1000_link(uint32_t *speed, int *full)
 {
-    memcpy(out_mac, mac_addr, 6);
+    uint32_t st = mmio_read32(E1000_REG_STATUS);
+    if (!(st & 2)) return 0;
+    uint32_t sp = (st >> 6) & 3;
+    if (speed) *speed = sp == 0 ? 10 : (sp == 1 ? 100 : 1000);
+    if (full) *full = (st & 1) ? 1 : 0;
+    return 1;
 }
+
+static struct nic_ops e1000_ops = { "Intel 82540EM (e1000)", e1000_send, e1000_recv, e1000_link, {0} };
 
 int e1000_init(void)
 {
     struct pci_device dev;
     if (pci_find_device(PCI_VENDOR_INTEL, PCI_DEVICE_E1000, &dev) < 0) {
-        printk("[INFO] Intel e1000 NIC not present: networking disabled\n");
         return -1;
     }
 
@@ -42,10 +52,8 @@ int e1000_init(void)
            dev.bus, dev.slot, dev.bar0);
 
     /* Проецируем 128 КБ MMIO-пространства e1000 */
-    for (uint64_t p = 0; p < 32; p++) {
-        map_page(NULL, dev.bar0 + (p * PAGE_SIZE), dev.bar0 + (p * PAGE_SIZE), PTE_WRITABLE);
-    }
-    e1000_mmio = (volatile uint32_t *)dev.bar0;
+    e1000_mmio = (volatile uint32_t *)mmio_map(dev.bar0, 32 * PAGE_SIZE, PTE_WRITABLE | (3ULL << 3));
+    if (!e1000_mmio) return -1;
 
     /* Сброс устройства */
     mmio_write32(E1000_REG_CTRL, mmio_read32(E1000_REG_CTRL) | (1 << 26));
@@ -107,12 +115,14 @@ int e1000_init(void)
     /* Маскируем прерывания (работаем в стабильном polling-режиме) */
     mmio_write32(E1000_REG_IMS, 0);
 
+    memcpy(e1000_ops.mac, mac_addr, 6);
+    nic_register(&e1000_ops);
     printk("[OK] Intel e1000 Initialized: MAC = %02x:%02x:%02x:%02x:%02x:%02x (Link Up, 1000 Mbps)\n",
            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
     return 0;
 }
 
-int e1000_send(const void *data, uint16_t len)
+static int e1000_send(const void *data, uint16_t len)
 {
     if (!e1000_mmio || len > E1000_BUFFER_SIZE) return -1;
 
@@ -132,7 +142,7 @@ int e1000_send(const void *data, uint16_t len)
     return len;
 }
 
-int e1000_recv(void *buf, uint16_t max_len)
+static int e1000_recv(void *buf, uint16_t max_len)
 {
     if (!e1000_mmio) return 0;
 

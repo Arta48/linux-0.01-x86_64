@@ -3,6 +3,7 @@
 
 void console_init(void);
 void console_putc(char c);
+int klog_read(char *dst, int max);
 void printk(const char *fmt, ...);
 
 #endif

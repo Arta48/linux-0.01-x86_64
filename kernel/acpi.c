@@ -98,6 +98,39 @@ static uint64_t find_rsdp_bios(void)
     return 0;
 }
 
+static uint64_t acpi_root = 0;
+static int      acpi_esz = 0;
+static uint32_t acpi_nent = 0;
+
+/* Таблица MADT: APIC ID включённых процессоров. Возвращает их число (до max),
+ * 0 -- MADT нет. bsp_id не исключается. */
+int acpi_madt_cpus(uint32_t *ids, int max)
+{
+    if (!acpi_root) return 0;
+    for (uint32_t i = 0; i < acpi_nent; i++) {
+        uint64_t t = acpi_esz == 8 ? rd64(acpi_root + 36 + (uint64_t)i * 8)
+                                   : rd32(acpi_root + 36 + (uint64_t)i * 4);
+        uint32_t len = table_len(t);
+        if (!len || !sig_is(t, "APIC")) continue;
+        int cnt = 0;
+        uint32_t off = 44;
+        while (off + 2 <= len) {
+            uint8_t type = rd8(t + off), l = rd8(t + off + 1);
+            if (l < 2 || off + l > len) break;
+            if (type == 0 && l >= 8) {                  /* Processor Local APIC */
+                uint32_t fl = rd32(t + off + 4);
+                if ((fl & 3) && cnt < max) ids[cnt++] = rd8(t + off + 3);
+            } else if (type == 9 && l >= 16) {          /* Processor Local x2APIC */
+                uint32_t id = rd32(t + off + 4), fl = rd32(t + off + 8);
+                if ((fl & 3) && id < 255 && cnt < max) ids[cnt++] = id;
+            }
+            off += l;
+        }
+        return cnt;
+    }
+    return 0;
+}
+
 int acpi_init(uint64_t rsdp)
 {
     if (!rsdp) rsdp = find_rsdp_bios();
@@ -118,6 +151,7 @@ int acpi_init(uint64_t rsdp)
     uint32_t rlen = table_len(root);
     if (!rlen) { printk("[WARN] ACPI: bad RSDT/XSDT\n"); return -1; }
     uint32_t n = (rlen - 36) / esz;
+    acpi_root = root; acpi_esz = esz; acpi_nent = n;
 
     uint64_t dsdt = 0;
     for (uint32_t i = 0; i < n; i++) {

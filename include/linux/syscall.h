@@ -28,22 +28,24 @@
 #define __NR_kill    37
 #define __NR_mkdir   39
 #define __NR_rmdir   40
-#define __NR_socket  41
 #define __NR_pipe    42
-#define __NR_accept  43
 #define __NR_sendto  44
 #define __NR_brk     45
 #define __NR_signal  48
-#define __NR_bind    49
-#define __NR_listen  50
 #define __NR_recvfrom 51
 #define __NR_uname   59
 #define __NR_reboot  88
+#define __NR_netctl  100     /* netctl(cmd, arg1, arg2, arg3): см. NETCTL_* */
+
+#define NETCTL_INFO   1      /* arg1 = struct net_info * */
+#define NETCTL_DHCP   3      /* повторный DHCP */
 #define __NR_dup2    63
 #define __NR_getcwd  79
 
 void syscall_init(void);
 int64_t sys_exit(int status);
+int64_t sys_exit_group(int status);
+void kill_other_threads(int status);
 int64_t sys_sync(void);
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, struct trap_frame *tf);
 
