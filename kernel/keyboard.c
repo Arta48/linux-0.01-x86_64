@@ -60,6 +60,15 @@ static void kbd_push_char(char c)
     }
 }
 
+extern void tty_sigint(void);
+void check_serial_events(void);
+
+int keyboard_pending(void)
+{
+    check_serial_events();
+    return kbd_head != kbd_tail;
+}
+
 void keyboard_inject_char(char c)
 {
     kbd_push_char(c);
@@ -68,13 +77,42 @@ void keyboard_inject_char(char c)
 void keyboard_inject_sigint(void)
 {
     if (current && current->pid > 0) {
-        send_signal(current, SIGINT);
+        tty_sigint();
     }
 }
 
+/* Читает байт контроллера i8042, только если он действительно готов (иначе дубли при опросе + IRQ1).
+ * 0xFF в статусе -- контроллера нет. Байты мыши (бит 5) пропускаются. */
+static int i8042_read(uint8_t *out)
+{
+    uint8_t st = inb(0x64);
+    if (st == 0xFF || !(st & 1)) return 0;
+    uint8_t b = inb(KBD_DATA_PORT);
+    if (st & 0x20) return -1;
+    *out = b;
+    return 1;
+}
+
+static void keyboard_scancode(uint8_t scancode);
+
 void keyboard_handler(void)
 {
-    uint8_t scancode = inb(KBD_DATA_PORT);
+    uint8_t sc;
+    for (int n = 0; n < 16; n++) {
+        int r = i8042_read(&sc);
+        if (r == 0) break;
+        if (r > 0) keyboard_scancode(sc);
+    }
+}
+
+/* Опрос из тика: клавиатура работает и там, где IRQ1 не доходит до CPU */
+void i8042_poll(void)
+{
+    keyboard_handler();
+}
+
+static void keyboard_scancode(uint8_t scancode)
+{
 
     if (scancode == 0xE0) {
         ext_scancode = 1;
@@ -108,6 +146,22 @@ void keyboard_handler(void)
                 kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('D');
                 return;
             }
+            if (scancode == 0x53) { /* Delete */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('3'); kbd_push_char('~');
+                return;
+            }
+            if (scancode == 0x52) { /* Insert */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('2'); kbd_push_char('~');
+                return;
+            }
+            if (scancode == 0x49) { /* Page Up */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('5'); kbd_push_char('~');
+                return;
+            }
+            if (scancode == 0x51) { /* Page Down */
+                kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('6'); kbd_push_char('~');
+                return;
+            }
             if (scancode == 0x47) { /* Home */
                 kbd_push_char('\033'); kbd_push_char('['); kbd_push_char('H');
                 return;
@@ -122,7 +176,7 @@ void keyboard_handler(void)
     /* Сигнал SIGINT при Ctrl+C на PS/2 */
     if (ctrl_pressed && scancode == 0x2E) {
         if (current && current->pid > 0) {
-            send_signal(current, SIGINT);
+            tty_sigint();
         }
         return;
     }
@@ -146,12 +200,17 @@ void keyboard_handler(void)
 
 void check_serial_events(void)
 {
-    while (inb(COM1_PORT + 5) & 0x01) {
+    /* Нет UART (ноутбуки): шина отдаёт 0xFF, "данные готовы" был бы всегда -- вечный цикл */
+    static int no_uart;
+    if (no_uart) return;
+    uint8_t lsr = inb(COM1_PORT + 5);
+    if (lsr == 0xFF) { no_uart = 1; return; }
+    for (int n = 0; n < 64 && (lsr & 0x01); n++, lsr = inb(COM1_PORT + 5)) {
         char c = (char)inb(COM1_PORT);
 
         if (c == 3) { /* Ctrl+C */
             if (current && current->pid > 1) {
-                send_signal(current, SIGINT);
+                tty_sigint();
                 continue;
             }
         }

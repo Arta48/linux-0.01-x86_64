@@ -7,7 +7,7 @@ int64_t sys_pipe(int *pipefd)
 {
     int rfd = -1, wfd = -1;
     for (int i = 3; i < NR_OPEN; i++) {
-        if (!current->filp[i].in_use) {
+        if (!current->files->f[i].in_use) {
             if (rfd == -1) {
                 rfd = i;
             } else if (wfd == -1) {
@@ -34,15 +34,15 @@ int64_t sys_pipe(int *pipefd)
     p->writers = 1;
     p->ref_count = 2; /* 2 открытых дескриптора: rfd и wfd */
 
-    current->filp[rfd].type = FILE_TYPE_PIPE;
-    current->filp[rfd].mode = 1;
-    current->filp[rfd].pipe = p;
-    current->filp[rfd].in_use = 1;
+    current->files->f[rfd].type = FILE_TYPE_PIPE;
+    current->files->f[rfd].mode = 1;
+    current->files->f[rfd].pipe = p;
+    current->files->f[rfd].in_use = 1;
 
-    current->filp[wfd].type = FILE_TYPE_PIPE;
-    current->filp[wfd].mode = 2;
-    current->filp[wfd].pipe = p;
-    current->filp[wfd].in_use = 1;
+    current->files->f[wfd].type = FILE_TYPE_PIPE;
+    current->files->f[wfd].mode = 2;
+    current->files->f[wfd].pipe = p;
+    current->files->f[wfd].in_use = 1;
 
     pipefd[0] = rfd;
     pipefd[1] = wfd;

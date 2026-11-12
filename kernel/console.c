@@ -3,6 +3,7 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <asm/io.h>
+#include <linux/font16.h>
 #include <stdarg.h>
 
 extern struct mb_info mbi;
@@ -17,68 +18,25 @@ static int cursor_y = 0;
 static uint32_t current_fg = 0xFFFFFF; /* Белый, как в обычной tty */
 static uint32_t current_bg = 0x000000; /* Черный фон */
 
-/* Минималистичный системный шрифт 8x8 (ASCII 32-127) */
-static const uint8_t font8x8[96][8] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00},
-    {0x66,0x66,0x66,0x00,0x00,0x00,0x00,0x00}, {0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0x00},
-    {0x18,0x7E,0x60,0x3C,0x06,0x7E,0x18,0x00}, {0x00,0xC6,0xCC,0x18,0x30,0x66,0xC6,0x00},
-    {0x38,0x6C,0x68,0x76,0xDC,0xCC,0x76,0x00}, {0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00},
-    {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}, {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00},
-    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00},
-    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00},
-    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, {0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0x00},
-    {0x3C,0x66,0x6E,0x7E,0x76,0x66,0x3C,0x00}, {0x18,0x38,0x58,0x18,0x18,0x18,0x7E,0x00},
-    {0x3C,0x66,0x06,0x0C,0x18,0x30,0x7E,0x00}, {0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00},
-    {0x0C,0x1C,0x3C,0x6C,0xCC,0xFE,0x0C,0x00}, {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00},
-    {0x3C,0x66,0x60,0x7C,0x66,0x66,0x3C,0x00}, {0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x00},
-    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00}, {0x3C,0x66,0x66,0x3E,0x06,0x66,0x3C,0x00},
-    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}, {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30},
-    {0x0C,0x18,0x30,0x60,0x30,0x18,0x0C,0x00}, {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00},
-    {0x30,0x18,0x0C,0x06,0x0C,0x18,0x30,0x00}, {0x3C,0x66,0x0C,0x18,0x18,0x00,0x18,0x00},
-    {0x3C,0x66,0x6E,0x6E,0x60,0x66,0x3C,0x00}, {0x3C,0x66,0x66,0x7E,0x66,0x66,0x66,0x00},
-    {0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00}, {0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00},
-    {0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00}, {0x7E,0x60,0x60,0x78,0x60,0x60,0x7E,0x00},
-    {0x7E,0x60,0x60,0x78,0x60,0x60,0x60,0x00}, {0x3C,0x66,0x60,0x6E,0x66,0x66,0x3E,0x00},
-    {0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00}, {0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00},
-    {0x1E,0x0C,0x0C,0x0C,0x0C,0x6C,0x38,0x00}, {0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00},
-    {0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00}, {0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00},
-    {0x66,0x76,0x7E,0x7E,0x6E,0x66,0x66,0x00}, {0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00},
-    {0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00}, {0x3C,0x66,0x66,0x66,0x6A,0x6C,0x36,0x00},
-    {0x7C,0x66,0x66,0x7C,0x6C,0x66,0x66,0x00}, {0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00},
-    {0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, {0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00},
-    {0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00}, {0x63,0x63,0x6B,0x7F,0x77,0x63,0x63,0x00},
-    {0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00}, {0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x00},
-    {0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00}, {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00},
-    {0x80,0xC0,0x60,0x30,0x18,0x0C,0x06,0x00}, {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00},
-    {0x18,0x3C,0x66,0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00},
-    {0x30,0x18,0x00,0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x3C,0x06,0x3E,0x66,0x3E,0x00},
-    {0x60,0x60,0x7C,0x66,0x66,0x66,0x7C,0x00}, {0x00,0x00,0x3C,0x60,0x60,0x66,0x3C,0x00},
-    {0x06,0x06,0x3E,0x66,0x66,0x66,0x3E,0x00}, {0x00,0x00,0x3C,0x66,0x7E,0x60,0x3C,0x00},
-    {0x1C,0x30,0x7C,0x30,0x30,0x30,0x30,0x00}, {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x3C},
-    {0x60,0x60,0x7C,0x66,0x66,0x66,0x66,0x00}, {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00},
-    {0x0C,0x00,0x1C,0x0C,0x0C,0x0C,0x0C,0x38}, {0x60,0x60,0x66,0x6C,0x78,0x6C,0x66,0x00},
-    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, {0x00,0x00,0x66,0x7F,0x7F,0x6B,0x63,0x00},
-    {0x00,0x00,0x7C,0x66,0x66,0x66,0x66,0x00}, {0x00,0x00,0x3C,0x66,0x66,0x66,0x3C,0x00},
-    {0x00,0x00,0x7C,0x66,0x66,0x7C,0x60,0x60}, {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x06},
-    {0x00,0x00,0x7C,0x66,0x60,0x60,0x60,0x00}, {0x00,0x00,0x3E,0x60,0x3C,0x06,0x7C,0x00},
-    {0x30,0x30,0x7C,0x30,0x30,0x34,0x18,0x00}, {0x00,0x00,0x66,0x66,0x66,0x66,0x3E,0x00},
-    {0x00,0x00,0x66,0x66,0x66,0x3C,0x18,0x00}, {0x00,0x00,0x63,0x6B,0x7F,0x77,0x63,0x00},
-    {0x00,0x00,0x66,0x3C,0x18,0x3C,0x66,0x00}, {0x00,0x00,0x66,0x66,0x66,0x3E,0x06,0x3C},
-    {0x00,0x00,0x7E,0x0C,0x18,0x30,0x7E,0x00}, {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00},
-    {0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18}, {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00},
-    {0x3B,0x6E,0x00,0x00,0x00,0x00,0x00,0x00}
-};
+/* Код Unicode -> индекс знака в font16 (нет знака -- '?') */
+static unsigned font_glyph(unsigned cp)
+{
+    for (int i = 0; i < FONT_NRANGES; i++)
+        if (cp >= font_ranges[i].first && cp <= font_ranges[i].last)
+            return font_ranges[i].base + (cp - font_ranges[i].first);
+    return FONT_FALLBACK;
+}
 
-static void draw_char(char c, int cx, int cy, uint32_t fg, uint32_t bg)
+static void draw_char(unsigned g, int cx, int cy, uint32_t fg, uint32_t bg)
 {
     if (!fb) return;
-    if (c < 32 || c > 126) c = '?';
-    const uint8_t *glyph = font8x8[c - 32];
+    if (g >= FONT_GLYPHS) g = FONT_FALLBACK;
+    const uint8_t *glyph = font16[g];
 
-    for (int y = 0; y < 8; y++) {
-        uint32_t *pixel_row = fb + ((cy * 8 + y) * (fb_pitch / 4)) + (cx * 8);
+    for (int y = 0; y < FONT_H; y++) {
+        uint32_t *pixel_row = fb + ((cy * FONT_H + y) * (fb_pitch / 4)) + (cx * FONT_W);
         uint8_t row_data = glyph[y];
-        for (int x = 0; x < 8; x++) {
+        for (int x = 0; x < FONT_W; x++) {
             pixel_row[x] = (row_data & (0x80 >> x)) ? fg : bg;
         }
     }
@@ -91,26 +49,41 @@ static void draw_char(char c, int cx, int cy, uint32_t fg, uint32_t bg)
  * Ячейка: младший байт -- символ, старший -- атрибуты (бит 0 = инверсия). */
 #define CON_MAX_COLS 320
 #define CON_MAX_ROWS 160
-#define ATTR_REV   0x100
-#define SHOWN_NONE 0xFFFF
-static uint16_t cells[CON_MAX_ROWS][CON_MAX_COLS]; /* что должно быть на экране */
-static uint16_t shown[CON_MAX_ROWS][CON_MAX_COLS]; /* что реально нарисовано     */
+/* Ячейка: бит 0-11 индекс знака font16 (для ASCII равен коду), бит 12 инверсия, 13-17 цвет текста
+ * (0 = по умолчанию, иначе 1+индекс 0..15), 18-22 цвет фона (так же) */
+#define GLYPH_MASK 0xFFF
+#define ATTR_REV   0x1000
+#define ATTR_FG(v) (((v) >> 13) & 31)
+#define ATTR_BG(v) (((v) >> 18) & 31)
+#define SHOWN_NONE 0xFFFFFFFFU
+typedef uint32_t cell_t;
+static cell_t cells[CON_MAX_ROWS][CON_MAX_COLS];   /* что должно быть на экране */
+static cell_t shown[CON_MAX_ROWS][CON_MAX_COLS];   /* что реально нарисовано     */
+
+/* Палитра ANSI: 0-7 обычные, 8-15 яркие (как у VGA) */
+static const uint32_t ansi_rgb[16] = {
+    0x000000, 0xAA0000, 0x00AA00, 0xAA5500, 0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
+    0x555555, 0xFF5555, 0x55FF55, 0xFFFF55, 0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+};
 static int con_cols = 0;
 static int con_rows = 0;
-static uint16_t cur_attr = 0;       /* текущие атрибуты вывода (ESC[..m) */
+static cell_t cur_attr = 0;
+static int sgr_bold = 0;       /* текущие атрибуты вывода (ESC[..m) */
 static int cursor_drawn = 0;        /* курсор сейчас нарисован на экране */
 
-static void draw_cell(uint16_t v, int cx, int cy)
+static void draw_cell(cell_t v, int cx, int cy)
 {
     uint32_t fg = current_fg, bg = current_bg;
+    if (ATTR_FG(v)) fg = ansi_rgb[ATTR_FG(v) - 1];
+    if (ATTR_BG(v)) bg = ansi_rgb[ATTR_BG(v) - 1];
     if (v & ATTR_REV) { fg = current_bg; bg = current_fg; }
-    draw_char((char)(v & 0xFF), cx, cy, fg, bg);
+    draw_char(v & GLYPH_MASK, cx, cy, fg, bg);
 }
 
-static void put_cell(char c, int cx, int cy)
+static void put_cell(unsigned g, int cx, int cy)
 {
     if (cx < 0 || cy < 0 || cx >= con_cols || cy >= con_rows) return;
-    uint16_t v = (uint16_t)((unsigned char)c | cur_attr);
+    cell_t v = (cell_t)((g & GLYPH_MASK) | cur_attr);
     cells[cy][cx] = v;
     if (shown[cy][cx] != v) {
         shown[cy][cx] = v;
@@ -139,7 +112,7 @@ static void cursor_hide(void)
     if (!cursor_drawn) return;
     cursor_drawn = 0;
     if (cursor_x < con_cols && cursor_y < con_rows) {
-        uint16_t v = cells[cursor_y][cursor_x];
+        cell_t v = cells[cursor_y][cursor_x];
         shown[cursor_y][cursor_x] = v;
         draw_cell(v, cursor_x, cursor_y);
     }
@@ -148,7 +121,7 @@ static void cursor_hide(void)
 static void cursor_show(void)
 {
     if (cursor_x >= con_cols || cursor_y >= con_rows) return;
-    uint16_t v = cells[cursor_y][cursor_x] ^ ATTR_REV;
+    cell_t v = cells[cursor_y][cursor_x] ^ ATTR_REV;
     shown[cursor_y][cursor_x] = SHOWN_NONE;  /* при любом обновлении перерисуется */
     draw_cell(v, cursor_x, cursor_y);
     cursor_drawn = 1;
@@ -187,6 +160,19 @@ static void fb_clear(void)
     cursor_drawn = 0;
 }
 
+void console_get_size(int *cols, int *rows);
+void console_get_geometry(int *w, int *h, int *cols, int *rows)
+{
+    *w = (int)fb_width; *h = (int)fb_height;
+    console_get_size(cols, rows);
+}
+
+void console_get_size(int *cols, int *rows)
+{
+    *cols = con_cols > 0 ? con_cols : 80;
+    *rows = con_rows > 0 ? con_rows : 25;
+}
+
 void console_init(void)
 {
     /* Инициализация фреймбуфера из параметров UEFI */
@@ -196,20 +182,18 @@ void console_init(void)
         fb_width = mbi.framebuffer_width;
         fb_height = mbi.framebuffer_height;
         fb_pitch = mbi.framebuffer_pitch;
-        con_cols = fb_width / 8;
-        con_rows = fb_height / 8;
+        con_cols = fb_width / FONT_W;
+        con_rows = fb_height / FONT_H;
         if (con_cols > CON_MAX_COLS) con_cols = CON_MAX_COLS;
         if (con_rows > CON_MAX_ROWS) con_rows = CON_MAX_ROWS;
 
         /* Проецируем физическую видеопамять в ядро */
         uint64_t fb_phys = mbi.framebuffer_addr;
-        uint64_t fb_size = fb_height * fb_pitch;
-        uint64_t pages = (fb_size + PAGE_SIZE - 1) / PAGE_SIZE;
-
-        for (uint64_t p = 0; p < pages; p++) {
-            map_page(NULL, fb_phys + (p * PAGE_SIZE), fb_phys + (p * PAGE_SIZE), PTE_WRITABLE);
-        }
-        fb = (uint32_t *)fb_phys;
+        uint64_t fb_size = (uint64_t)fb_height * fb_pitch;
+        /* mmio_map: identity в окне 2-64 ГБ, иначе ioremap в PML4[511] --
+         * обе области общие для всех адресных пространств процессов */
+        fb = (uint32_t *)mmio_map(fb_phys, fb_size, PTE_WRITABLE);
+        if (!fb) return;
         fb_clear();
     }
 }
@@ -284,9 +268,20 @@ static void csi_exec(char f)
     case 'm':
         for (int i = 0; i <= esc_np; i++) {
             int v = esc_have[i] ? esc_par[i] : 0;
-            if (v == 0 || v == 27) cur_attr = 0;
-            else if (v == 7) cur_attr = ATTR_REV;
-            /* остальные атрибуты (цвета, жирный) пока не поддерживаются */
+            cell_t fg = ATTR_FG(cur_attr), bg = ATTR_BG(cur_attr);
+            if (v == 0) { cur_attr = 0; sgr_bold = 0; continue; }
+            if (v == 1) { sgr_bold = 1; if (fg >= 1 && fg <= 8) fg += 8; }
+            else if (v == 22) { sgr_bold = 0; if (fg >= 9) fg -= 8; }
+            else if (v == 7) { cur_attr |= ATTR_REV; continue; }
+            else if (v == 27) { cur_attr &= ~(cell_t)ATTR_REV; continue; }
+            else if (v >= 30 && v <= 37) fg = 1 + (v - 30) + (sgr_bold ? 8 : 0);
+            else if (v == 39) fg = 0;
+            else if (v >= 40 && v <= 47) bg = 1 + (v - 40);
+            else if (v == 49) bg = 0;
+            else if (v >= 90 && v <= 97) fg = 1 + 8 + (v - 90);
+            else if (v >= 100 && v <= 107) bg = 1 + 8 + (v - 100);
+            else continue;
+            cur_attr = (cur_attr & ATTR_REV) | (fg << 13) | (bg << 18);
         }
         break;
     case 's': saved_x = cursor_x; saved_y = cursor_y; break;
@@ -321,30 +316,63 @@ static void esc_feed(char c)
     }
 }
 
+/* Журнал ядра для dmesg: копия всего, что вывел printk */
+#define KLOG_SIZE 16384
+static char klog_buf[KLOG_SIZE];
+static unsigned klog_head, klog_len;
+static int klog_active;
+
+int klog_read(char *dst, int max)
+{
+    int n = (int)klog_len < max ? (int)klog_len : max;
+    unsigned start = (klog_head + KLOG_SIZE - klog_len + (klog_len - (unsigned)n)) % KLOG_SIZE;
+    for (int i = 0; i < n; i++) dst[i] = klog_buf[(start + (unsigned)i) % KLOG_SIZE];
+    return n;
+}
+
+/* UTF-8 -> знак шрифта. Возвращает 1, когда знак готов (*g), 0 -- нужны ещё байты.
+ * Serial получает байты как есть, декодирование только для экрана. */
+static int utf8_feed(unsigned char u, unsigned *g)
+{
+    static int need;
+    static unsigned cp;
+    if (u < 0x80) { need = 0; *g = u; return 1; }
+    if (u >= 0xC0) { need = u >= 0xF0 ? 3 : u >= 0xE0 ? 2 : 1; cp = u & (0x3F >> need); return 0; }
+    if (!need) return 0;
+    cp = (cp << 6) | (u & 0x3F);
+    if (--need) return 0;
+    *g = font_glyph(cp);
+    return 1;
+}
+
 void console_putc(char c)
 {
-    if (c == '\b' || c == 127) {
-        /* В терминале QEMU (COM1): возврат влево, пробел, возврат влево */
+    if (klog_active) {
+        klog_buf[klog_head] = c;
+        klog_head = (klog_head + 1) % KLOG_SIZE;
+        if (klog_len < KLOG_SIZE) klog_len++;
+    }
+    if (c == '\b') {
+        /* Как в настоящем терминале: только сдвиг курсора влево, символ не стирается
+         * (стирание "\b \b" делают программы, например tty_echo_erase и readline). */
         serial_out('\b');
-        serial_out(' ');
-        serial_out('\b');
-
-        /* На экране (Framebuffer) */
         if (fb && cursor_x > 0) {
             cursor_hide();
             cursor_x--;
-            uint16_t keep = cur_attr; cur_attr = 0;
-            put_cell(' ', cursor_x, cursor_y);
-            cur_attr = keep;
             cursor_show();
         }
         return;
     }
+    if (c == 127) return;               /* DEL не отображается */
 
     /* Пишем в COM1 (терминал QEMU сам разбирает ESC-последовательности) */
     serial_out(c);
 
     if (!fb) return; /* Если фреймбуфера нет (BIOS режим), ничего не рисуем на экран */
+
+    unsigned glyph = (unsigned char)c;
+    if (!esc_state && !utf8_feed((unsigned char)c, &glyph)) return;
+    int ascii = ((unsigned char)c < 0x80);   /* для проверок ниже: управляющие символы -- только ASCII */
 
     cursor_hide();
 
@@ -353,21 +381,21 @@ void console_putc(char c)
 
     if (esc_state) {
         esc_feed(c);
-    } else if (c == 27) {
+    } else if (ascii && c == 27) {
         esc_state = 1;
-    } else if (c == '\n') {
+    } else if (ascii && c == '\n') {
         cursor_x = 0;
         cursor_y++;
-    } else if (c == '\r') {
+    } else if (ascii && c == '\r') {
         cursor_x = 0;
-    } else if (c == '\t') {
+    } else if (ascii && c == '\t') {
         int nx = (cursor_x + 8) & ~7;
         while (cursor_x < nx && cursor_x < max_cols - 1) {
             put_cell(' ', cursor_x, cursor_y);
             cursor_x++;
         }
-    } else if ((unsigned char)c >= 32) {
-        put_cell(c, cursor_x, cursor_y);
+    } else if (!ascii || (unsigned char)c >= 32) {
+        put_cell(glyph, cursor_x, cursor_y);
         cursor_x++;
         if (cursor_x >= max_cols) {
             cursor_x = 0;
@@ -381,23 +409,34 @@ void console_putc(char c)
     cursor_show();
 }
 
-static void print_num(unsigned long n, int base)
+static void print_num_w(unsigned long n, int base, int width, int zero)
 {
     char buf[65];
     static const char digits[] = "0123456789ABCDEF";
     int i = 0;
-    if (n == 0) { console_putc('0'); return; }
+    if (n == 0) buf[i++] = '0';
     while (n > 0) { buf[i++] = digits[n % base]; n /= base; }
+    for (int pad = width - i; pad > 0; pad--) console_putc(zero ? '0' : ' ');
     while (--i >= 0) console_putc(buf[i]);
+}
+
+static void print_num(unsigned long n, int base)
+{
+    print_num_w(n, base, 0, 0);
 }
 
 void printk(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
+    klog_active = 1;
     for (const char *p = fmt; *p != '\0'; p++) {
         if (*p != '%') { console_putc(*p); continue; }
         p++;
+        int zero = 0, width = 0;                      /* %02x, %8d */
+        if (*p == '0') { zero = 1; p++; }
+        while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
+        while (*p == 'l') p++;
         switch (*p) {
             case 'c': console_putc((char)va_arg(args, int)); break;
             case 's': {
@@ -408,15 +447,17 @@ void printk(const char *fmt, ...)
             }
             case 'd': {
                 long d = va_arg(args, long);
-                if (d < 0) { console_putc('-'); d = -d; }
-                print_num(d, 10);
+                if (d < 0) { console_putc('-'); d = -d; if (width) width--; }
+                print_num_w((unsigned long)d, 10, width, zero);
                 break;
             }
-            case 'x': print_num(va_arg(args, unsigned long), 16); break;
+            case 'u': print_num_w(va_arg(args, unsigned long), 10, width, zero); break;
+            case 'x': print_num_w(va_arg(args, unsigned long), 16, width, zero); break;
             case 'p': console_putc('0'); console_putc('x'); print_num(va_arg(args, unsigned long), 16); break;
             case '%': console_putc('%'); break;
             default: console_putc(*p); break;
         }
     }
+    klog_active = 0;
     va_end(args);
 }

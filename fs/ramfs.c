@@ -1,13 +1,15 @@
+#include <linux/nic.h>
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
 #include <linux/time.h>
 #include <linux/multiboot.h>
 #include <linux/hdreg.h>
-#include <linux/tcp.h>
+#include <linux/sock.h>
 #include <linux/pci.h>
 #include <linux/xhci.h>
 #include <linux/blkdev.h>
@@ -50,6 +52,21 @@ static void get_cpu_info(char *vendor, char *brand)
 
 extern volatile int smp_num_cpus;
 
+static uint64_t ci_put(char *buf, uint64_t o, uint64_t max_len, const char *str)
+{
+    while (*str && o + 1 < max_len) buf[o++] = *str++;
+    return o;
+}
+
+static uint64_t ci_num(char *buf, uint64_t o, uint64_t max_len, uint64_t v)
+{
+    char nb[24]; int ni = 0;
+    if (!v) nb[ni++] = '0';
+    while (v) { nb[ni++] = '0' + (v % 10); v /= 10; }
+    while (--ni >= 0 && o + 1 < max_len) buf[o++] = nb[ni];
+    return o;
+}
+
 static void generate_cpuinfo(char *buf, uint64_t max_len)
 {
     char vendor[16];
@@ -58,21 +75,21 @@ static void generate_cpuinfo(char *buf, uint64_t max_len)
 
     uint64_t o = 0;
     int cpus = (smp_num_cpus > 0) ? smp_num_cpus : 1;
+    uint64_t khz = tsc_get_khz();
 
-    for (int c = 0; c < cpus && o < max_len - 256; c++) {
-        const char *p1 = "processor\t: ";
-        while (*p1 && o < max_len - 256) buf[o++] = *p1++;
-        buf[o++] = '0' + c;
-        const char *p2 = "\nvendor_id\t: ";
-        while (*p2 && o < max_len - 256) buf[o++] = *p2++;
-        const char *v = vendor;
-        while (*v && o < max_len - 256) buf[o++] = *v++;
-        const char *m = "\nmodel name\t: ";
-        while (*m && o < max_len - 256) buf[o++] = *m++;
-        const char *b = brand;
-        while (*b && o < max_len - 256) buf[o++] = *b++;
-        const char *tail = "\ncpu MHz\t\t: 3600.00\nflags\t\t: fpu sse sse2 syscall lm smp apic\n\n";
-        while (*tail && o < max_len - 1) buf[o++] = *tail++;
+    for (int c = 0; c < cpus && o + 400 < max_len; c++) {
+        o = ci_put(buf, o, max_len, "processor\t: ");  o = ci_num(buf, o, max_len, (uint64_t)c);
+        o = ci_put(buf, o, max_len, "\nvendor_id\t: "); o = ci_put(buf, o, max_len, vendor);
+        o = ci_put(buf, o, max_len, "\nmodel name\t: "); o = ci_put(buf, o, max_len, brand);
+        o = ci_put(buf, o, max_len, "\ncpu MHz\t\t: ");
+        o = ci_num(buf, o, max_len, khz / 1000);
+        o = ci_put(buf, o, max_len, ".");
+        uint64_t frac = (khz % 1000) / 10;
+        o = ci_num(buf, o, max_len, frac / 10); o = ci_num(buf, o, max_len, frac % 10);
+        o = ci_put(buf, o, max_len, "\nphysical id\t: 0\nsiblings\t: "); o = ci_num(buf, o, max_len, (uint64_t)cpus);
+        o = ci_put(buf, o, max_len, "\ncore id\t\t: "); o = ci_num(buf, o, max_len, (uint64_t)c);
+        o = ci_put(buf, o, max_len, "\ncpu cores\t: "); o = ci_num(buf, o, max_len, (uint64_t)cpus);
+        o = ci_put(buf, o, max_len, "\nflags\t\t: fpu sse sse2 syscall lm smp apic\n\n");
     }
     buf[o] = '\0';
 }
@@ -80,7 +97,7 @@ static void generate_cpuinfo(char *buf, uint64_t max_len)
 static void generate_meminfo(char *buf, uint64_t max_len)
 {
     uint32_t free_p = get_free_pages_count();
-    uint64_t total_kb = HIGH_MEMORY / 1024;
+    uint64_t total_kb = ((uint64_t)get_total_pages_count() * PAGE_SIZE) / 1024;
     uint64_t free_kb = ((uint64_t)free_p * PAGE_SIZE) / 1024;
     uint64_t used_kb = total_kb - free_kb;
 
@@ -108,6 +125,88 @@ static void generate_meminfo(char *buf, uint64_t max_len)
     while (*s3 && o < max_len - 1) buf[o++] = *s3++;
 
     buf[o] = '\0';
+}
+
+static void app_dec(char *buf, uint64_t *o, uint64_t max, uint64_t v)
+{
+    char nb[24]; int ni = 0;
+    if (!v) nb[ni++] = '0';
+    while (v) { nb[ni++] = '0' + (v % 10); v /= 10; }
+    while (--ni >= 0 && *o < max - 1) buf[(*o)++] = nb[ni];
+}
+
+extern volatile uint64_t jiffies;
+extern void console_get_geometry(int *w, int *h, int *cols, int *rows);
+
+static void generate_uptime(char *buf, uint64_t max_len)
+{
+    uint64_t o = 0, t = jiffies;
+    app_dec(buf, &o, max_len, t / 100);
+    buf[o++] = '.';
+    buf[o++] = '0' + (t % 100) / 10;
+    buf[o++] = '0' + t % 10;
+    buf[o++] = '\n';
+    buf[o] = 0;
+}
+
+static void generate_version(char *buf, uint64_t max_len)
+{
+    (void)max_len;
+    const char *v = "Linux version 0.01-x86_64 (linux64) #1 PREEMPT 2026\n";
+    uint64_t o = 0;
+    while (*v) buf[o++] = *v++;
+    buf[o] = 0;
+}
+
+static void generate_mounts(char *buf, uint64_t max_len)
+{
+    (void)max_len;
+    strcpy(buf, "rootfs / rootfs rw 0 0\n");
+}
+
+static void generate_mountinfo(char *buf, uint64_t max_len)
+{
+    (void)max_len;
+    strcpy(buf, "1 1 0:1 / / rw - rootfs rootfs rw\n");
+}
+
+extern uint32_t net_dns;
+
+static void generate_resolv(char *buf, uint64_t max_len)
+{
+    (void)max_len;
+    uint32_t d = net_dns ? net_dns : 0x0A000203U;
+    uint64_t o = 0;
+    strcpy(buf, "nameserver "); o = 11;
+    for (int i = 3; i >= 0; i--) {
+        app_dec(buf, &o, max_len, (d >> (i * 8)) & 0xFF);
+        buf[o++] = i ? '.' : '\n';
+    }
+    buf[o] = 0;
+}
+
+static void generate_hosts(char *buf, uint64_t max_len)
+{
+    (void)max_len;
+    strcpy(buf, "127.0.0.1 localhost linux64\n::1 localhost\n");
+}
+
+static void generate_nsswitch(char *buf, uint64_t max_len)
+{
+    (void)max_len;
+    strcpy(buf, "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\nprotocols: files\nservices: files\n");
+}
+
+static void generate_display(char *buf, uint64_t max_len)
+{
+    int w = 0, h = 0, c = 80, r = 25;
+    console_get_geometry(&w, &h, &c, &r);
+    uint64_t o = 0;
+    app_dec(buf, &o, max_len, (uint64_t)w); buf[o++] = 'x';
+    app_dec(buf, &o, max_len, (uint64_t)h); buf[o++] = ' ';
+    app_dec(buf, &o, max_len, (uint64_t)c); buf[o++] = 'x';
+    app_dec(buf, &o, max_len, (uint64_t)r); buf[o++] = '\n';
+    buf[o] = 0;
 }
 
 static void append_str(char *buf, uint64_t *o, uint64_t max, const char *s)
@@ -193,7 +292,7 @@ static void generate_pciinfo(char *buf, uint64_t max_len)
     buf[o] = '\0';
 }
 
-static void resolve_path(const char *in, char *out)
+static void resolve_path_raw(const char *in, char *out)
 {
     char tmp[MAX_FILENAME];
     uint64_t ti = 0;
@@ -237,6 +336,71 @@ static void resolve_path(const char *in, char *out)
     memcpy(out, tmp, ti + 1);
 }
 
+/* Слитый /usr: пути обычных дистрибутивов (/usr/bin, /usr/lib, /lib64, ...) ведут в наши /bin и /lib.
+ * Это позволяет запускать бинарники и скрипты, собранные под Arch/Debian, без правки путей. */
+static int sys_links;                       /* сколько символических ссылок создано (только под /sys) */
+
+/* Заменяет первую ссылку-компонент в /sys/... её целью; до 8 раз */
+static void follow_links(char *path)
+{
+    for (int iter = 0; iter < 8; iter++) {
+        int found = 0;
+        uint64_t len = strlen(path);
+        for (uint64_t p = 5; p <= len && !found; p++) {
+            if (path[p] != '/' && path[p] != '\0') continue;
+            for (int i = 0; i < MAX_FILES; i++) {
+                struct ram_file *f = &ram_files[i].base;
+                if (!f->in_use || !f->is_link || strncmp(f->name, path, p) != 0 || f->name[p] != '\0') continue;
+                char joined[MAX_FILENAME * 2], norm[MAX_FILENAME];
+                uint64_t o = 0;
+                if (f->data[0] != '/') {            /* относительная цель: от каталога ссылки */
+                    uint64_t d = p;
+                    while (d > 0 && path[d - 1] != '/') d--;
+                    if (d > 1) d--;
+                    memcpy(joined, path, d);
+                    o = d;
+                    joined[o++] = '/';
+                }
+                uint64_t tl = strlen(f->data);
+                if (o + tl + (len - p) + 1 > sizeof(joined)) return;
+                memcpy(joined + o, f->data, tl);
+                o += tl;
+                memcpy(joined + o, path + p, len - p + 1);
+                resolve_path_raw(joined, norm);
+                strcpy(path, norm);
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return;
+    }
+}
+
+static void resolve_path(const char *in, char *out)
+{
+    resolve_path_raw(in, out);
+    if (sys_links && strncmp(out, "/sys/", 5) == 0) follow_links(out);
+    static const struct { const char *from, *to; } alias[] = {
+        { "/usr/local/bin/", "/bin/" }, { "/usr/local/sbin/", "/bin/" },
+        { "/usr/bin/", "/bin/" }, { "/usr/sbin/", "/bin/" }, { "/sbin/", "/bin/" },
+        { "/usr/lib/x86_64-linux-gnu/", "/lib/" }, { "/lib/x86_64-linux-gnu/", "/lib/" },
+        { "/usr/share/terminfo/", "/lib/terminfo/" }, { "/etc/terminfo/", "/lib/terminfo/" },
+        { "/usr/lib64/", "/lib/" }, { "/lib64/", "/lib/" }, { "/usr/lib/", "/lib/" },
+    };
+    for (unsigned i = 0; i < sizeof(alias) / sizeof(alias[0]); i++) {
+        uint64_t fl = strlen(alias[i].from);
+        if (strncmp(out, alias[i].from, fl) != 0) continue;
+        if (out[fl] == '\0') break;                 /* сам каталог (/usr/bin/) не трогаем */
+        char tmp[MAX_FILENAME];
+        uint64_t tl = strlen(alias[i].to), rl = strlen(out + fl);
+        if (tl + rl >= MAX_FILENAME) break;
+        memcpy(tmp, alias[i].to, tl);
+        memcpy(tmp + tl, out + fl, rl + 1);
+        memcpy(out, tmp, tl + rl + 1);
+        break;
+    }
+}
+
 static inline int is_minix_path(const char *path)
 {
     return (strncmp(path, "/mnt", 4) == 0 && (path[4] == '/' || path[4] == '\0'));
@@ -276,10 +440,66 @@ int ramfs_create_dir(const char *path, uint16_t mode)
             ram_files[i].base.mode = mode ? mode : 0755;
             ram_files[i].base.data = NULL;
             ram_files[i].base.is_dev_blk = 0;
+            ram_files[i].base.is_link = 0;
             ram_files[i].is_proc = 0;
             ram_files[i].generator = NULL;
             return 0;
         }
+    }
+    return -1;
+}
+
+int ramfs_create_symlink(const char *path, const char *target)
+{
+    char full[MAX_FILENAME];
+    resolve_path_raw(path, full);
+    uint64_t tl = strlen(target);
+    if (tl >= MAX_FILENAME) return -1;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (ram_files[i].base.in_use) continue;
+        char *pg = (char *)get_free_page();
+        if (!pg) return -1;
+        struct ram_file *f = &ram_files[i].base;
+        memcpy(f->name, full, strlen(full) + 1);
+        memcpy(pg, target, tl + 1);
+        f->data = pg;
+        f->size = tl;
+        f->capacity = PAGE_SIZE;
+        f->mtime = get_current_time();
+        f->uid = f->gid = 0;
+        f->mode = 0777;
+        f->in_use = 1;
+        f->is_readonly = 1;
+        f->is_dir = 0;
+        f->is_dev_blk = 0;
+        f->is_link = 1;
+        ram_files[i].is_proc = 0;
+        ram_files[i].generator = NULL;
+        sys_links++;
+        return 0;
+    }
+    return -1;
+}
+
+int64_t fs_readlink(const char *path, char *buf, uint64_t size)
+{
+    char raw[MAX_FILENAME], parent[MAX_FILENAME], full[MAX_FILENAME];
+    resolve_path_raw(path, raw);
+    uint64_t l = strlen(raw);
+    while (l > 1 && raw[l - 1] != '/') l--;
+    memcpy(parent, raw, l > 1 ? l - 1 : 1);
+    parent[l > 1 ? l - 1 : 1] = '\0';
+    resolve_path(parent, full);
+    uint64_t fl = strlen(full);
+    if (fl + strlen(raw + l) + 2 >= MAX_FILENAME) return -1;
+    if (fl > 1) full[fl++] = '/';
+    strcpy(full + fl, raw + l);
+    for (int i = 0; i < MAX_FILES; i++) {
+        struct ram_file *f = &ram_files[i].base;
+        if (!f->in_use || !f->is_link || strcmp(f->name, full) != 0) continue;
+        uint64_t n = f->size < size ? f->size : size;
+        memcpy(buf, f->data, n);
+        return (int64_t)n;
     }
     return -1;
 }
@@ -324,6 +544,7 @@ int ramfs_create_file(const char *path, const char *data, uint64_t size, uint16_
         ram_files[idx].base.data = (char *)page;
         ram_files[idx].base.capacity = pages * PAGE_SIZE;
         ram_files[idx].base.is_dev_blk = 0;
+        ram_files[idx].base.is_link = 0;
         ram_files[idx].is_proc = 0;
         ram_files[idx].generator = NULL;
     }
@@ -428,6 +649,7 @@ void fs_init(void)
         ram_files[i].base.is_readonly = 0;
         ram_files[i].base.is_dir = 0;
         ram_files[i].base.is_dev_blk = 0;
+        ram_files[i].base.is_link = 0;
         ram_files[i].is_proc = 0;
         ram_files[i].generator = NULL;
     }
@@ -445,7 +667,7 @@ void fs_init(void)
     }
 
     const char *init_names[] = {
-        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/etc/init.sh"
+        "/README.txt", "/version", "/author", "/etc/motd", "/etc/passwd", "/etc/group"
     };
     const char *init_data[] = {
         "====================================================\n"
@@ -461,19 +683,14 @@ void fs_init(void)
         "  - Minix v1 Disk Filesystem mounted on /mnt\n"
         "  - Buffer Cache (1024B blocks, hash table, LRU)\n"
         "  - Persistent files & directories across reboots\n"
-        "  - Shell scripts execution & full-screen nano\n",
+        "  - Linux x86_64 ABI: GNU coreutils and bash run unmodified\n",
 
         "Linux version 0.01-x86_64 (root@arch) (gcc 14) #1 PREEMPT 2026\n",
         "Original: Linus Torvalds (Helsinki, 1991)\nx86_64 Port: Educational Project (2026)\n",
         "Welcome to 64-bit Unix! Have a lot of fun hacking kernels.\n",
-        "root:root:0:0:Superuser:/root\nuser:user:1000:1000:Regular User:/home\nguest:guest:1001:1001:Guest Account:/home\n",
-        "# /etc/init.sh - System startup script\n"
-        "echo [INIT] Running startup script /etc/init.sh...\n"
-        "uname -a\n"
-        "export SHELL=/bin/sh\n"
-        "export HOSTNAME=linux64\n"
-        "echo [INIT] RAM root filesystem active; /mnt is Minix v1 when an ATA disk is present\n"
-        "echo [INIT] Initialization complete.\n"
+        "root:root:0:0:Superuser:/root:/bin/bash\nuser:user:1000:1000:Regular User:/home:/bin/bash\nguest:guest:1001:1001:Guest Account:/home:/bin/bash\n",
+
+        "root:x:0:\nuser:x:1000:\nguest:x:1001:\n"
     };
 
     for (int i = 0; i < 6; i++) {
@@ -500,14 +717,18 @@ void fs_init(void)
         ram_files[idx].base.is_readonly = 0;
         ram_files[idx].base.is_dir = 0;
         ram_files[idx].base.is_dev_blk = 0;
+        ram_files[idx].base.is_link = 0;
         ram_files[idx].base.mtime = startup_time;
         ram_files[idx].base.mode = 0644;
     }
 
     int c_idx = 13;
     memcpy(ram_files[c_idx].base.name, "/proc/cpuinfo", 14);
-    ram_files[c_idx].base.data = (char *)get_free_page();
-    ram_files[c_idx].base.capacity = PAGE_SIZE;
+    {   /* ramfs создаётся раньше SMP: места хватает под максимум ядер (~320 байт на ядро) */
+        uint32_t cp = (uint32_t)(((MAX_CPUS * 320) + PAGE_SIZE - 1) / PAGE_SIZE);
+        ram_files[c_idx].base.data = (char *)get_free_pages(cp);
+        ram_files[c_idx].base.capacity = (uint64_t)cp * PAGE_SIZE;
+    }
     ram_files[c_idx].base.in_use = 1;
     ram_files[c_idx].base.is_readonly = 1;
     ram_files[c_idx].is_proc = 1;
@@ -552,6 +773,28 @@ void fs_init(void)
     ram_files[dk_idx].is_proc = 1;
     ram_files[dk_idx].generator = generate_disks;
 
+    static const struct { int idx; const char *name; void (*gen)(char *, uint64_t); } extra[] = {
+        { 19, "/proc/uptime",  generate_uptime },
+        { 20, "/proc/version", generate_version },
+        { 21, "/proc/display", generate_display },
+        { 22, "/proc/mounts",  generate_mounts },
+        { 23, "/proc/self/mountinfo", generate_mountinfo },
+        { 24, "/etc/mtab",     generate_mounts },
+        { 25, "/etc/resolv.conf", generate_resolv },
+        { 26, "/etc/hosts",    generate_hosts },
+        { 27, "/etc/nsswitch.conf", generate_nsswitch },
+    };
+    for (unsigned k = 0; k < sizeof(extra) / sizeof(extra[0]); k++) {
+        int x = extra[k].idx;
+        strcpy(ram_files[x].base.name, extra[k].name);
+        ram_files[x].base.data = (char *)get_free_page();
+        ram_files[x].base.capacity = PAGE_SIZE;
+        ram_files[x].base.in_use = 1;
+        ram_files[x].base.is_readonly = 1;
+        ram_files[x].is_proc = 1;
+        ram_files[x].generator = extra[k].gen;
+    }
+
     /* Блочное устройство /dev/hda для жесткого диска */
     int hd_idx = 16;
     const struct blk_dev *hd = blk_get(0);
@@ -572,7 +815,7 @@ void fs_init(void)
         const struct blk_dev *bd = blk_get(bi);
         if (!bd || !bd->present) continue;
         int slot = -1;
-        for (int k = 19; k < MAX_FILES; k++) if (!ram_files[k].base.in_use) { slot = k; break; }
+        for (int k = 28; k < MAX_FILES; k++) if (!ram_files[k].base.in_use) { slot = k; break; }
         if (slot < 0) break;
         memcpy(ram_files[slot].base.name, "/dev/", 5);
         uint64_t nl = strlen(bd->name);
@@ -626,14 +869,14 @@ int64_t sys_open(const char *filename, int flags)
         }
 
         for (int fd = 3; fd < NR_OPEN; fd++) {
-            if (!current->filp[fd].in_use) {
-                current->filp[fd].type = FILE_TYPE_MINIX;
-                current->filp[fd].rf = NULL;
-                current->filp[fd].pipe = NULL;
-                current->filp[fd].minix_ino = minix_ino;
-                current->filp[fd].pos = (flags & O_APPEND) ? fsz : 0;
-                current->filp[fd].in_use = 1;
-                current->filp[fd].mode = (flags & 3) ? (flags & 3) : 1;
+            if (!current->files->f[fd].in_use) {
+                current->files->f[fd].type = FILE_TYPE_MINIX;
+                current->files->f[fd].rf = NULL;
+                current->files->f[fd].pipe = NULL;
+                current->files->f[fd].minix_ino = minix_ino;
+                current->files->f[fd].pos = (flags & O_APPEND) ? fsz : 0;
+                current->files->f[fd].in_use = 1;
+                current->files->f[fd].mode = (flags & 3) ? (flags & 3) : 1;
                 return fd;
             }
         }
@@ -673,6 +916,7 @@ int64_t sys_open(const char *filename, int flags)
         ram_files[file_idx].base.is_readonly = 0;
         ram_files[file_idx].base.is_dir = 0;
         ram_files[file_idx].base.is_dev_blk = 0;
+        ram_files[file_idx].base.is_link = 0;
         ram_files[file_idx].is_proc = 0;
         ram_files[file_idx].generator = NULL;
     }
@@ -688,19 +932,19 @@ int64_t sys_open(const char *filename, int flags)
     }
 
     for (int fd = 3; fd < NR_OPEN; fd++) {
-        if (!current->filp[fd].in_use) {
-            current->filp[fd].type = ram_files[file_idx].base.is_dev_blk ? FILE_TYPE_BLOCK : FILE_TYPE_REGULAR;
-            current->filp[fd].rf   = (struct ram_file *)&ram_files[file_idx].base;
+        if (!current->files->f[fd].in_use) {
+            current->files->f[fd].type = ram_files[file_idx].base.is_dev_blk ? FILE_TYPE_BLOCK : FILE_TYPE_REGULAR;
+            current->files->f[fd].rf   = (struct ram_file *)&ram_files[file_idx].base;
 
             if (flags & O_APPEND) {
-                current->filp[fd].pos = ram_files[file_idx].base.size;
+                current->files->f[fd].pos = ram_files[file_idx].base.size;
             } else {
-                current->filp[fd].pos = 0;
+                current->files->f[fd].pos = 0;
             }
 
-            current->filp[fd].pipe = NULL;
-            current->filp[fd].in_use = 1;
-            current->filp[fd].mode = (flags & 3) ? (flags & 3) : 1;
+            current->files->f[fd].pipe = NULL;
+            current->files->f[fd].in_use = 1;
+            current->files->f[fd].mode = (flags & 3) ? (flags & 3) : 1;
             return fd;
         }
     }
@@ -710,11 +954,11 @@ int64_t sys_open(const char *filename, int flags)
 
 int64_t sys_close(int fd)
 {
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+    if (fd < 0 || fd >= NR_OPEN || !current->files->f[fd].in_use) {
         return -1;
     }
 
-    struct file *f = &current->filp[fd];
+    struct file *f = &current->files->f[fd];
 
     if (f->type == FILE_TYPE_PIPE && f->pipe) {
         if (f->mode == 1) f->pipe->readers--;
@@ -727,7 +971,7 @@ int64_t sys_close(int fd)
     }
 
     if (f->type == FILE_TYPE_SOCKET) {
-        tcp_socket_close(f->sock_id);
+        sock_close(f->sock_id);
     }
 
     f->in_use = 0;
@@ -741,11 +985,11 @@ int64_t sys_close(int fd)
 
 int64_t sys_file_read(int fd, char *buf, uint64_t count)
 {
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+    if (fd < 0 || fd >= NR_OPEN || !current->files->f[fd].in_use) {
         return -1;
     }
 
-    struct file *f = &current->filp[fd];
+    struct file *f = &current->files->f[fd];
 
     if (f->type == FILE_TYPE_PIPE) {
         return pipe_read(f, buf, count);
@@ -756,7 +1000,7 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
     }
 
     if (f->type == FILE_TYPE_SOCKET) {
-        return tcp_socket_read(f->sock_id, buf, count);
+        return sock_recv(f->sock_id, buf, count, 0, NULL, NULL);
     }
 
     struct ram_file *rf = f->rf;
@@ -809,11 +1053,11 @@ int64_t sys_file_read(int fd, char *buf, uint64_t count)
 
 int64_t sys_file_write(int fd, const char *buf, uint64_t count)
 {
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) {
+    if (fd < 0 || fd >= NR_OPEN || !current->files->f[fd].in_use) {
         return -1;
     }
 
-    struct file *f = &current->filp[fd];
+    struct file *f = &current->files->f[fd];
 
     if (f->type == FILE_TYPE_PIPE) {
         return pipe_write(f, buf, count);
@@ -824,7 +1068,7 @@ int64_t sys_file_write(int fd, const char *buf, uint64_t count)
     }
 
     if (f->type == FILE_TYPE_SOCKET) {
-        return tcp_socket_write(f->sock_id, buf, count);
+        return sock_send(f->sock_id, buf, count, 0, 0, 0, 0);
     }
 
     struct ram_file *rf = f->rf;
@@ -1082,6 +1326,13 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
 
         if (match) {
             const char *display = (strcmp(target, "/") == 0) ? name + 1 : name + tlen + 1;
+            int shown_dir = ram_files[i].base.is_dir;
+            if (ram_files[i].base.is_link) {                    /* ссылка на каталог показывается как каталог */
+                char rp[MAX_FILENAME];
+                resolve_path(name, rp);
+                for (int k = 0; k < MAX_FILES; k++)
+                    if (ram_files[k].base.in_use && ram_files[k].base.is_dir && strcmp(ram_files[k].base.name, rp) == 0) { shown_dir = 1; break; }
+            }
 
             if (is_long) {
                 const char *perms = ram_files[i].base.is_dir ? "drwxr-xr-x  " :
@@ -1105,11 +1356,11 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
                 buf[offset++] = ' ';
 
                 while (*display && offset < max_len - 16) buf[offset++] = *display++;
-                if (ram_files[i].base.is_dir) buf[offset++] = '/';
+                if (shown_dir) buf[offset++] = '/';
                 buf[offset++] = '\n';
             } else {
                 while (*display && offset < max_len - 16) buf[offset++] = *display++;
-                if (ram_files[i].base.is_dir) {
+                if (shown_dir) {
                     buf[offset++] = '/';
                 }
                 buf[offset++] = '\n';
@@ -1119,4 +1370,66 @@ int64_t sys_list(const char *dir_path, char *buf, uint64_t max_len, int is_long)
 
     buf[offset] = '\0';
     return offset;
+}
+
+/* ---- вспомогательные функции для слоя Linux ABI ---- */
+void fs_resolve_path(const char *in, char *out)
+{
+    resolve_path(in, out);
+}
+
+static int ram_find(const char *full)
+{
+    for (int i = 0; i < MAX_FILES; i++)
+        if (ram_files[i].base.in_use && strcmp(full, ram_files[i].base.name) == 0) return i;
+    return -1;
+}
+
+/* Переименование обычного файла в ramfs (каталоги и Minix -> -1: вызывающий копирует и удаляет) */
+int fs_rename(const char *from, const char *to)
+{
+    if (is_minix_path(from) || is_minix_path(to)) return -1;
+    int a = ram_find(from);
+    if (a < 0) return -1;
+    struct ram_file *rf = &ram_files[a].base;
+    if (rf->is_dir || rf->is_readonly || rf->is_dev_blk || ram_files[a].is_proc) return -1;
+    if (current->euid != 0 && current->euid != rf->uid) return -1;
+    if (strlen(to) >= MAX_FILENAME) return -1;
+    int b = ram_find(to);
+    if (b == a) return 0;
+    if (b >= 0) {
+        if (ram_files[b].base.is_dir || ram_files[b].base.is_readonly) return -1;
+        if (ram_files[b].base.data) free_page((uint64_t)ram_files[b].base.data);
+        ram_files[b].base.in_use = 0;
+        ram_files[b].base.name[0] = '\0';
+        ram_files[b].base.data = NULL;
+        ram_files[b].base.size = 0;
+    }
+    memcpy(rf->name, to, strlen(to) + 1);
+    return 0;
+}
+
+/* Изменение размера файла ramfs */
+int fs_truncate_path(const char *path, uint64_t len)
+{
+    if (is_minix_path(path)) return -1;
+    int i = ram_find(path);
+    if (i < 0) return -1;
+    struct ram_file *rf = &ram_files[i].base;
+    if (rf->is_dir || rf->is_readonly || rf->is_dev_blk || ram_files[i].is_proc) return -1;
+    if (len > rf->capacity) {
+        uint32_t pages = (uint32_t)((len + PAGE_SIZE) / PAGE_SIZE);
+        uint64_t np = get_free_pages(pages);
+        if (!np) return -1;
+        memset((void *)np, 0, (uint64_t)pages * PAGE_SIZE);
+        if (rf->data && rf->size) memcpy((void *)np, rf->data, rf->size);
+        if (rf->data) free_page((uint64_t)rf->data);
+        rf->data = (char *)np;
+        rf->capacity = (uint64_t)pages * PAGE_SIZE;
+    } else if (len > rf->size && rf->data) {
+        memset(rf->data + rf->size, 0, len - rf->size);
+    }
+    rf->size = len;
+    rf->mtime = get_current_time();
+    return 0;
 }

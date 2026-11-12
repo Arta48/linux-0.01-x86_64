@@ -39,7 +39,6 @@ extern void uefi_kernel_jump(uint64_t magic, uint64_t mbi_addr, uint64_t entry_p
 #define PG                 4096ULL
 #define KERNEL_BASE        0x100000ULL
 #define KERNEL_ENTRY_PTR   (KERNEL_BASE + 0x10)       /* uefi_entry_ptr в .multiboot */
-#define POOL_MAX           (128ULL * 1024 * 1024)    /* размер mem_map ядра */
 #define IDMAP_LIMIT        (1ULL << 30)              /* identity-map ядра: 1 ГБ */
 #define MMAP_PAGES         32                         /* 128 КБ под карту памяти */
 
@@ -237,7 +236,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     } else {
         uint64_t pages = (initrd_size + PG - 1) / PG;
         st = bs->AllocatePages(AllocateAddress, EfiLoaderData, pages, &initrd_addr);
-        if (st != EFI_SUCCESS) fail((const CHAR16 *)u"Cannot reserve memory for initrd", st);
+        if (st != EFI_SUCCESS) {
+            /* За ядром не хватило места (большой rootfs): берём начало самого крупного свободного
+             * участка в пределах identity-map ядра. Страница mb_info и свободная память ядра
+             * продолжаются сразу за initrd, остальное пространство просто не используется. */
+            uint64_t tmp = 0, tsz = MMAP_PAGES * PG, tkey = 0, tdesc = 0;
+            uint32_t tver = 0;
+            if (bs->AllocatePages(AllocateAnyPages, EfiLoaderData, MMAP_PAGES, &tmp) != EFI_SUCCESS ||
+                bs->GetMemoryMap(&tsz, (void *)tmp, &tkey, &tdesc, &tver) != EFI_SUCCESS)
+                fail((const CHAR16 *)u"Cannot reserve memory for initrd", st);
+            uint64_t best = 0, best_pages = 0;
+            for (uint64_t off = 0; off + tdesc <= tsz; off += tdesc) {
+                EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)(tmp + off);
+                if (d->Type != 7) continue;                        /* EfiConventionalMemory */
+                uint64_t s0 = d->PhysicalStart, e0 = s0 + d->NumberOfPages * PG;
+                if (s0 < 0x200000) s0 = 0x200000;
+                if (e0 > IDMAP_LIMIT) e0 = IDMAP_LIMIT;
+                if (e0 <= s0) continue;
+                uint64_t n = (e0 - s0) / PG;
+                if (n > best_pages) { best_pages = n; best = s0; }
+            }
+            if (best_pages < pages + 1 + 2048) fail((const CHAR16 *)u"Not enough contiguous memory for initrd", st);
+            initrd_addr = best;
+            st = bs->AllocatePages(AllocateAddress, EfiLoaderData, pages, &initrd_addr);
+            if (st != EFI_SUCCESS) fail((const CHAR16 *)u"Cannot reserve memory for initrd", st);
+        }
         if (read_exact(rf, (void *)initrd_addr, initrd_size) != 0) fail((const CHAR16 *)u"Read /rootfs.tar", 0);
         rf->Close(rf);
         cur = initrd_addr + pages * PG;
@@ -256,6 +279,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     {
         uint64_t rsdp = find_rsdp(SystemTable);
         if (rsdp && rsdp < (1ULL << 32)) mbi->config_table = (uint32_t)rsdp;
+    }
+    {
+        /* Страница под трамплин AP: SIPI запускает ядро только с адреса < 1 МБ.
+         * Выделяем у прошивки, чтобы она не занимала её под свои данные. */
+        uint64_t low = 0x9F000;
+        if (bs->AllocatePages(AllocateMaxAddress, EfiLoaderData, 1, &low) == EFI_SUCCESS &&
+            low >= 0x1000 && low < 0xA0000)
+            mbi->smp_trampoline = (uint32_t)low;
     }
     if (initrd_size) {
         mod->mod_start = (uint32_t)initrd_addr;
@@ -295,28 +326,53 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     /* ---- Boot Services больше нет: никаких вызовов прошивки ---- */
 
-    /* 6. Непрерывный свободный участок после mb_info: только типы памяти, которые
-     *    ядро вправе занять, и только в пределах identity-map ядра. */
-    uint64_t pool_start = mbi_page + PG;
-    uint64_t pool_end = pool_start;
-    uint64_t limit = pool_start + POOL_MAX;
-    if (limit > IDMAP_LIMIT) limit = IDMAP_LIMIT;
-    int progress = 1;
-    while (progress && pool_end < limit) {
-        progress = 0;
-        for (uint64_t off = 0; off + desc_size <= mmap_size; off += desc_size) {
-            EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)(mmap_buf + off);
-            uint64_t s = d->PhysicalStart, e = s + d->NumberOfPages * PG;
-            if (usable_type(d->Type) && s <= pool_end && e > pool_end) {
-                pool_end = e;
-                progress = 1;
+    /* 6. Все свободные участки ОЗУ ниже identity-map ядра (1 ГБ), кроме занятых нами:
+     *    ядро, initrd, mb_info. Ядро собирает из них свою страничную память; раньше брался
+     *    один участок за initrd, а на ноутбуках с дырявой картой памяти его не хватало. */
+    struct mb_ranges *rg = (struct mb_ranges *)(mbi_page + MB_RANGES_OFFSET);
+    rg->count = 0;
+    uint64_t ex[3][2] = { { KERNEL_BASE, k_end },
+                          { initrd_size ? initrd_addr : 0, initrd_size ? cur : 0 },
+                          { mbi_page, mbi_page + PG } };
+    for (uint64_t off = 0; off + desc_size <= mmap_size; off += desc_size) {
+        EFI_MEMORY_DESCRIPTOR *d = (EFI_MEMORY_DESCRIPTOR *)(mmap_buf + off);
+        if (!usable_type(d->Type)) continue;
+        uint64_t seg_s = d->PhysicalStart, seg_e = seg_s + d->NumberOfPages * PG;
+        if (seg_s < 0x200000) seg_s = 0x200000;
+        /* вычитаем занятые куски: segs -- очередь неотрезанных частей */
+        uint64_t segs[8][2];
+        int n = 0;
+        if (seg_e > seg_s) { segs[0][0] = seg_s; segs[0][1] = seg_e; n = 1; }
+        for (int x = 0; x < 3; x++) {
+            if (ex[x][1] <= ex[x][0]) continue;
+            int m = n;
+            for (int i = 0; i < m; i++) {
+                uint64_t a0 = segs[i][0], a1 = segs[i][1];
+                if (ex[x][1] <= a0 || ex[x][0] >= a1) continue;
+                segs[i][1] = ex[x][0] > a0 ? ex[x][0] : a0;       /* левая часть (может стать пустой) */
+                if (ex[x][1] < a1 && n < 8) { segs[n][0] = ex[x][1]; segs[n][1] = a1; n++; }
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            if (segs[i][1] <= segs[i][0]) continue;
+            uint64_t cs = segs[i][0], ce = segs[i][1];
+            int merged = 0;
+            for (uint32_t k = 0; k < rg->count; k++) {
+                if (rg->r[k][1] == cs) { rg->r[k][1] = ce; merged = 1; break; }
+                if (rg->r[k][0] == ce) { rg->r[k][0] = cs; merged = 1; break; }
+            }
+            if (!merged && rg->count < MB_RANGES_MAX) {
+                rg->r[rg->count][0] = cs; rg->r[rg->count][1] = ce; rg->count++;
             }
         }
     }
-    if (pool_end > limit) pool_end = limit;
-    mbi->flags |= MB_FLAG_MEM;
+    mbi->flags |= MB_FLAG_MEM | MB_FLAG_RANGES;
     mbi->mem_lower = 640;
-    mbi->mem_upper = (uint32_t)((pool_end - KERNEL_BASE) / 1024);
+    {
+        uint64_t top = KERNEL_BASE;
+        for (uint32_t k = 0; k < rg->count; k++) if (rg->r[k][1] > top) top = rg->r[k][1];
+        mbi->mem_upper = (uint32_t)((top - KERNEL_BASE) / 1024);
+    }
 
     uefi_kernel_jump(MULTIBOOT_BOOTLOADER_MAGIC, mbi_page, entry);
 

@@ -22,6 +22,7 @@ struct tss_entry {
 } __attribute__((packed));
 
 void gdt_init(void);
+void gdt_load_ap(void);
 void set_tss_stack(uint64_t kstack);
 
 #endif

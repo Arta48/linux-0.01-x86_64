@@ -6,10 +6,20 @@
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
 #define MB_FLAG_MEM                (1 << 0)
 #define MB_FLAG_MODS               (1 << 3)
+#define MB_FLAG_MMAP               (1 << 6)   /* mmap_addr/mmap_length валидны */
 #define MB_FLAG_FB                 (1 << 12)  /* framebuffer_* поля валидны */
 /* Расширение: ядро загружено нашим UEFI-загрузчиком, mem_upper = граница
  * непрерывной свободной области (КБ выше 1 МБ), проверенная по карте памяти UEFI */
+#define MB_FLAG_RANGES             (1 << 30)  /* UEFI: список свободных участков ОЗУ лежит в mb_info+1024 */
 #define MB_FLAG_UEFI               (1u << 31)
+
+#define MB_RANGES_OFFSET   1024
+#define MB_RANGES_MAX      120
+struct mb_ranges {
+    uint32_t count;
+    uint32_t pad;
+    uint64_t r[MB_RANGES_MAX][2];      /* [начало, конец) в байтах; вся ОЗУ, не только ниже 1 ГБ */
+};
 
 struct mb_module {
     uint32_t mod_start;
@@ -46,6 +56,8 @@ struct mb_info {
     uint32_t framebuffer_height;
     uint8_t  framebuffer_bpp;
     uint8_t  framebuffer_type;
+    uint8_t  reserved_fb[3];
+    uint32_t smp_trampoline;   /* UEFI: страница < 1 МБ под трамплин AP (0 = нет) */
 } __attribute__((packed));
 
 struct tar_header {

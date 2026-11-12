@@ -96,10 +96,6 @@ int     signal(int sig, void (*handler)(int));
 int     uname(struct utsname *name);
 int     sync(void);
 int     reboot(int cmd);   /* 0 = выключить, 1 = перезагрузить, 2 = остановить */
-int     socket(int domain, int type, int protocol);
-int     bind(int sockfd, uint16_t port);
-int     listen(int sockfd, int backlog);
-int     accept(int sockfd);
 int64_t list(const char *path, char *buf, size_t max_len, int is_long);
 void    ps(void);
 void    pause(void);
@@ -121,6 +117,19 @@ const char *strstr(const char *haystack, const char *needle);
 void   *memcpy(void *dest, const void *src, size_t n);
 void   *memset(void *s, int c, size_t n);
 int64_t atoi(const char *s);
+
+/* Сеть: netctl(NETCTL_INFO / NETCTL_DHCP, ...) */
+#define NETCTL_INFO 1
+#define NETCTL_DHCP 3
+struct net_info {
+    char     name[48];
+    uint8_t  mac[6];
+    uint8_t  present, link, full, dhcp;
+    uint32_t speed;
+    uint32_t ip, mask, gw, dns;
+};
+int64_t netctl(int cmd, uint64_t a1, uint64_t a2, uint64_t a3);
+int     parse_ip(const char *s, uint32_t *out);
 
 /* Форматированный ввод-вывод */
 int     vsnprintf(char *str, size_t size, const char *format, va_list ap);

@@ -128,3 +128,9 @@ enter_user_mode:
     pushq %rax         /* RIP: Адрес входа функции пользователя */
 
     iretq               /* Прыжок в Ring 3! */
+
+/* void launch_user_frame(struct trap_frame *tf): прыжок в Ring 3 по готовому кадру */
+.globl launch_user_frame
+launch_user_frame:
+    movq %rdi, %rsp
+    jmp syscall_return_to_user

@@ -6,6 +6,7 @@
 /* Разбирает ACPI (RSDP от UEFI-загрузчика или поиск в BIOS-области при rsdp == 0):
  * FADT (порты PM1, регистр сброса) и _S5 из DSDT/SSDT. Вызывать один раз при загрузке. */
 int  acpi_init(uint64_t rsdp);
+int  acpi_madt_cpus(uint32_t *ids, int max);
 
 /* Выключение / перезагрузка ПК; при неудаче возвращают управление не гарантированно */
 void acpi_poweroff(void);

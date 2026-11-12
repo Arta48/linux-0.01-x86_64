@@ -1,4 +1,6 @@
+#include <linux/smp.h>
 #include <linux/traps.h>
+int lx_fault_signal(struct trap_frame *tf, int sig);
 #include <linux/tty.h>
 #include <linux/sched.h>
 #include <linux/syscall.h>
@@ -19,6 +21,7 @@ static struct idt_entry idt[256];
 static struct idt_ptr   idtr;
 
 volatile uint64_t jiffies = 0;
+extern void i8042_poll(void);
 
 extern void isr0();  extern void isr1();  extern void isr2();  extern void isr3();
 extern void isr4();  extern void isr5();  extern void isr6();  extern void isr7();
@@ -136,6 +139,8 @@ void isr_handler(struct trap_frame *tf)
             extern void usb_kbd_poll(void);
             usb_kbd_poll();
             outb(0x20, 0x20);
+            if (lapic_tick_mode) lapic_eoi();
+            i8042_poll();
             do_timer();
 
             /* Доставка сигналов при возврате в Ring 3 */
@@ -194,10 +199,14 @@ void isr_handler(struct trap_frame *tf)
     if (tf->int_no < 20 && (tf->cs & 3) == 3 && current && current->pid > 1) {
         uint64_t cr2 = 0;
         if (tf->int_no == 14) __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+        {
+            int sig = (tf->int_no == 0 || tf->int_no == 16) ? 8 : tf->int_no == 6 ? 4 : tf->int_no == 7 ? 4 : 11;
+            if (lx_fault_signal(tf, sig)) return;
+        }
         printk("\n[Process %d killed: %s at RIP %p, addr %p, err %p]\n",
                (int)current->pid, exceptions[tf->int_no], tf->rip, cr2, tf->error_code);
         __asm__ volatile ("sti");
-        sys_exit(128 + 11);
+        if (current->linux_abi) sys_exit_group(128 + 11); else sys_exit(128 + 11);
         return;
     }
 

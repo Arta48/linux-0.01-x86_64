@@ -89,6 +89,5 @@ int kthread_create(int (*fn)(void *), void *arg, const char *name)
         strcpy(task[pid]->name, "kthread");
     }
 
-    printk("[OK] Kernel Thread '%s' created (PID %d)\n", task[pid]->name, pid);
     return pid;
 }

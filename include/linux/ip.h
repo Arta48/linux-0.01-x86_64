@@ -59,13 +59,26 @@ struct udp_header {
     uint16_t checksum;
 } __attribute__((packed));
 
+struct net_info {
+    char     name[48];
+    uint8_t  mac[6];
+    uint8_t  present, link, full, dhcp;      /* dhcp: 0 нет, 1 DHCP, 2 запасной адрес */
+    uint32_t speed;
+    uint32_t ip, mask, gw, dns;              /* порядок хоста */
+};
+
+int     net_get_info(struct net_info *ni);
+int     net_dhcp_renew(void);
+
 uint16_t net_checksum(const void *buf, uint32_t len);
 
 void net_stack_init(void);
 void net_poll(void);
 void net_stack_rx(const void *frame, uint16_t len);
+int  ip_send_ex(uint32_t dest_ip, uint8_t protocol, const void *payload, uint16_t len, int wait);
+uint32_t net_src_for(uint32_t dst);
+void net_arp_prepare(uint32_t dst);
 int  ip_send(uint32_t dest_ip, uint8_t protocol, const void *payload, uint16_t len);
-int  icmp_ping(uint32_t target_ip, uint16_t seq);
 int  udp_send(uint32_t dest_ip, uint16_t src_port, uint16_t dest_port, const void *data, uint16_t len);
 
 #endif

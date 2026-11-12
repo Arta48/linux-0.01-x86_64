@@ -271,21 +271,12 @@ static int ctrl_init(const struct pci_device *pd)
     if (((lo >> 1) & 3) == 2) bar |= (uint64_t)pci_read_dword(pd->bus, pd->slot, pd->func, 0x14) << 32;
     if (!bar) { printk("[NVMe] %x:%x.%d: BAR0 not assigned\n", (long)pd->bus, (long)pd->slot, (long)pd->func); return 0; }
 
-    /* Регистры должны быть видны из любого процесса: общая часть адресного
-     * пространства -- первый гигабайт и PDPT[3] (3..4 ГБ) */
-    if (!(bar < 0x40000000ULL || (bar >= 0xC0000000ULL && bar + 0x4000 <= 0x100000000ULL))) {
-        printk("[NVMe] %x:%x.%d: BAR at %p is outside the shared 3-4 GB window, skipped\n",
-               (long)pd->bus, (long)pd->slot, (long)pd->func, bar);
-        return 0;
-    }
     uint16_t cmd = pci_read_word(pd->bus, pd->slot, pd->func, 0x04);
     pci_write_word(pd->bus, pd->slot, pd->func, 0x04, (uint16_t)(cmd | 0x0406));  /* MEM + BusMaster + INTx off */
 
-    if (bar >= 0x40000000ULL) {
-        for (uint64_t pg = 0; pg < 4; pg++)
-            map_page(NULL, bar + pg * PAGE_SIZE, bar + pg * PAGE_SIZE, PTE_WRITABLE | (3ULL << 3));
-    }
-    c->regs = (volatile uint8_t *)bar;
+    /* Регистры видны из любого процесса (общее окно или область ioremap) */
+    c->regs = (volatile uint8_t *)mmio_map(bar, 0x4000, PTE_WRITABLE | (3ULL << 3));
+    if (!c->regs) { printk("[NVMe] %x:%x.%d: cannot map BAR %p\n", (long)pd->bus, (long)pd->slot, (long)pd->func, bar); return 0; }
 
     uint32_t vs = rd32(c, 0x08);
     if (vs == 0xFFFFFFFFU) { printk("[NVMe] nvme%d: registers read as all-ones\n", (long)c->idx); return 0; }

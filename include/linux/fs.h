@@ -4,9 +4,9 @@
 #include <linux/types.h>
 #include <linux/stat.h>
 
-#define NR_OPEN       16
+#define NR_OPEN       64
 #define MAX_FILENAME  80
-#define MAX_FILES     128
+#define MAX_FILES     8192
 #define PIPE_BUF_SIZE 4064
 
 #define FILE_TYPE_REGULAR 1
@@ -14,6 +14,9 @@
 #define FILE_TYPE_BLOCK   3
 #define FILE_TYPE_MINIX   4
 #define FILE_TYPE_SOCKET  5
+#define FILE_TYPE_TTY     6   /* консоль/клавиатура (fd 0..2 Linux-процессов) */
+#define FILE_TYPE_DEV     7   /* /dev/null, zero, tty, urandom: sock_id = вид */
+#define FILE_TYPE_DIR     8   /* открытый каталог: path + pos = число прочитанных записей */
 
 #define O_RDONLY  00
 #define O_WRONLY  01
@@ -55,6 +58,7 @@ struct ram_file {
     int is_dir;
     int is_dev_blk;
     uint8_t dev_id;
+    uint8_t is_link;        /* символическая ссылка: data -- целевой путь (только /sys) */
 };
 
 struct file {
@@ -66,11 +70,15 @@ struct file {
     uint32_t minix_ino;
     int sock_id;           /* Индекс сокета TCP для FILE_TYPE_SOCKET */
     int in_use;
+    char path[64];         /* полный путь (для fstat/getdents/fchdir) */
 };
 
 void fs_init(void);
+void sysfs_init(void);
 void tarfs_mount(uint64_t archive_start, uint64_t archive_end);
 int ramfs_create_dir(const char *path, uint16_t mode);
+int ramfs_create_symlink(const char *path, const char *target);
+int64_t fs_readlink(const char *path, char *buf, uint64_t size);
 int ramfs_create_file(const char *path, const char *data, uint64_t size, uint16_t mode, uint16_t uid, uint16_t gid, uint64_t mtime);
 
 int64_t sys_open(const char *filename, int flags);
@@ -91,6 +99,9 @@ int64_t sys_pipe(int *pipefd);
 int64_t pipe_read(struct file *f, char *buf, uint64_t count);
 int64_t pipe_write(struct file *f, const char *buf, uint64_t count);
 
+void fs_resolve_path(const char *in, char *out);
+int  fs_rename(const char *from, const char *to);
+int  fs_truncate_path(const char *path, uint64_t len);
 const char *fs_get_file_data(const char *name, uint64_t *out_size);
 
 #endif

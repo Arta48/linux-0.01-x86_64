@@ -8,7 +8,7 @@
 #include <linux/string.h>
 #include <linux/utsname.h>
 #include <linux/time.h>
-#include <linux/tcp.h>
+#include <linux/sock.h>
 #include <linux/elf.h>
 #include <linux/acpi.h>
 
@@ -54,20 +54,20 @@ void syscall_init(void)
     printk("[OK] Hardware 'syscall/sysret' MSRs Initialized\n");
 }
 
-static int64_t sys_read(int fd, char *buf, uint64_t count)
+int64_t sys_read(int fd, char *buf, uint64_t count)
 {
     if (count == 0) return 0;
     if (fd < 0 || fd >= NR_OPEN) return -1;
 
-    if (current->filp[fd].in_use) {
-        if (current->filp[fd].type == FILE_TYPE_PIPE) {
-            return pipe_read(&current->filp[fd], buf, count);
+    if (current->files->f[fd].in_use && current->files->f[fd].type != FILE_TYPE_TTY) {
+        if (current->files->f[fd].type == FILE_TYPE_PIPE) {
+            return pipe_read(&current->files->f[fd], buf, count);
         } else {
             return sys_file_read(fd, buf, count);
         }
     }
 
-    if (fd == 0) {
+    if (fd == 0 || (current->files->f[fd].in_use && current->files->f[fd].type == FILE_TYPE_TTY)) {
         uint64_t bytes_read = 0;
         while (bytes_read < count) {
             __asm__ volatile ("sti");
@@ -93,19 +93,19 @@ static int64_t sys_read(int fd, char *buf, uint64_t count)
     return -1;
 }
 
-static int64_t sys_write(int fd, const char *buf, uint64_t count)
+int64_t sys_write(int fd, const char *buf, uint64_t count)
 {
     if (fd < 0 || fd >= NR_OPEN) return -1;
 
-    if (current->filp[fd].in_use) {
-        if (current->filp[fd].type == FILE_TYPE_PIPE) {
-            return pipe_write(&current->filp[fd], buf, count);
+    if (current->files->f[fd].in_use && current->files->f[fd].type != FILE_TYPE_TTY) {
+        if (current->files->f[fd].type == FILE_TYPE_PIPE) {
+            return pipe_write(&current->files->f[fd], buf, count);
         } else {
             return sys_file_write(fd, buf, count);
         }
     }
 
-    if (fd == 1 || fd == 2) {
+    if (fd == 1 || fd == 2 || (current->files->f[fd].in_use && current->files->f[fd].type == FILE_TYPE_TTY)) {
         for (uint64_t i = 0; i < count; i++) {
             console_putc(buf[i]);
         }
@@ -115,29 +115,30 @@ static int64_t sys_write(int fd, const char *buf, uint64_t count)
     return -1;
 }
 
-static int64_t sys_dup2(int oldfd, int newfd)
+int64_t sys_dup2(int oldfd, int newfd)
 {
     if (oldfd < 0 || oldfd >= NR_OPEN) return -1;
     if (newfd < 0 || newfd >= NR_OPEN) return -1;
 
     if (oldfd == newfd) return newfd;
 
-    if (current->filp[newfd].in_use) {
+    if (current->files->f[newfd].in_use) {
         sys_close(newfd);
     }
 
-    if (!current->filp[oldfd].in_use) {
-        current->filp[newfd].in_use = 0;
+    if (!current->files->f[oldfd].in_use) {
+        current->files->f[newfd].in_use = 0;
         return newfd;
     }
 
-    current->filp[newfd] = current->filp[oldfd];
+    current->files->f[newfd] = current->files->f[oldfd];
 
-    if (current->filp[newfd].type == FILE_TYPE_PIPE && current->filp[newfd].pipe) {
-        current->filp[newfd].pipe->ref_count++;
-        if (current->filp[newfd].mode == 1) current->filp[newfd].pipe->readers++;
-        if (current->filp[newfd].mode == 2) current->filp[newfd].pipe->writers++;
+    if (current->files->f[newfd].type == FILE_TYPE_PIPE && current->files->f[newfd].pipe) {
+        current->files->f[newfd].pipe->ref_count++;
+        if (current->files->f[newfd].mode == 1) current->files->f[newfd].pipe->readers++;
+        if (current->files->f[newfd].mode == 2) current->files->f[newfd].pipe->writers++;
     }
+    if (current->files->f[newfd].type == FILE_TYPE_SOCKET) sock_ref(current->files->f[newfd].sock_id);
 
     return newfd;
 }
@@ -236,26 +237,45 @@ static void sys_ps(void)
     printk("\n");
 }
 
-static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
+/* Есть ли у процесса tgid живые (не зомби) потоки, кроме лидера */
+static int group_has_live_threads(long tgid)
 {
+    for (int i = 1; i < NR_TASKS; i++) {
+        struct task_struct *t = task[i];
+        if (t && t->is_thread && t->tgid == tgid && t->state != TASK_ZOMBIE) return 1;
+    }
+    return 0;
+}
+
+int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
+{
+    reap_zombie_threads();
     repeat:
     for (int i = 1; i < NR_TASKS; i++) {
-        if (task[i] && task[i]->father == current->pid) {
-            if (pid == -1 || task[i]->pid == pid) {
-                if (task[i]->state == TASK_ZOMBIE) {
-                    int64_t child_pid = task[i]->pid;
+        struct task_struct *c = task[i];
+        if (c && !c->is_thread && c->father == current->tgid) {
+            if (pid == -1 || c->pid == pid) {
+                if (c->state == TASK_ZOMBIE && !group_has_live_threads(c->tgid)) {
+                    int64_t child_pid = c->pid;
                     if (stat_addr) {
-                        *stat_addr = task[i]->exit_code;
+                        *stat_addr = c->exit_code;
                     }
 
-                    if (task[i]->user_stack_page) {
-                        free_pages(task[i]->user_stack_page, 8);
+                    /* потоки-зомби этого процесса: память принадлежит лидеру */
+                    for (int k = 1; k < NR_TASKS; k++) {
+                        struct task_struct *t = task[k];
+                        if (t && t->is_thread && t->tgid == c->tgid) {
+                            task[k] = NULL;
+                            free_task(t);
+                        }
                     }
-                    if (task[i]->cr3) {
-                        free_process_pml4(task[i]->cr3);
-                        task[i]->cr3 = 0;
+
+                    if (c->cr3) {
+                        free_process_pml4(c->cr3);
+                        c->cr3 = 0;
                     }
-                    free_page((uint64_t)task[i]);
+                    vma_clear(c);
+                    free_task(c);
                     task[i] = NULL;
 
                     return child_pid;
@@ -266,7 +286,7 @@ static int64_t sys_waitpid(int64_t pid, int *stat_addr, int options)
 
     int has_children = 0;
     for (int i = 1; i < NR_TASKS; i++) {
-        if (task[i] && task[i]->father == current->pid) {
+        if (task[i] && !task[i]->is_thread && task[i]->father == current->tgid) {
             if (pid == -1 || task[i]->pid == pid) {
                 has_children = 1;
                 break;
@@ -317,179 +337,50 @@ static int64_t sys_pause(void)
     return 0;
 }
 
-static int64_t sys_brk(uint64_t new_brk)
+static struct vma *heap_vma(void)
 {
-    if (new_brk == 0 || new_brk < current->start_brk) {
-        return (int64_t)current->brk;
+    for (int i = 0; i < current->mm->nvma; i++) {
+        if (current->mm->vmas[i].flags & VM_HEAP) return &current->mm->vmas[i];
     }
-
-    if (new_brk > current->brk) {
-        uint64_t cur_page = PAGE_ALIGN(current->brk);
-        uint64_t end_page = PAGE_ALIGN(new_brk);
-
-        for (uint64_t addr = cur_page; addr < end_page; addr += PAGE_SIZE) {
-            uint64_t phys = get_free_page();
-            if (!phys) {
-                return (int64_t)current->brk;
-            }
-            map_page((uint64_t *)current->cr3, addr, phys, PTE_WRITABLE | PTE_USER);
-        }
-    }
-
-    current->brk = new_brk;
-    return (int64_t)current->brk;
+    return NULL;
 }
 
-static int64_t sys_execve(const char *filename, char **argv, char **envp, struct trap_frame *tf)
+/* brk: куча -- ленивая VMA [start_brk, brk). Страницы выделяются при первом обращении. */
+int64_t sys_brk(uint64_t new_brk)
 {
-    (void)envp;
-
-    if (!tf) return -1;
-
-    uint64_t file_size = 0;
-    const char *data = fs_get_file_data(filename, &file_size);
-    if (!data || file_size < 16) {
-        return -1;
+    if (new_brk == 0 || new_brk < current->mm->start_brk) {
+        return (int64_t)current->mm->brk;
     }
+    if (new_brk > USER_VA_MAX - PAGE_SIZE) return (int64_t)current->mm->brk;
 
-    const struct exec_header *hdr = (const struct exec_header *)data;
-    int is_linus001 = (file_size >= sizeof(struct exec_header) && hdr->magic == EXEC_MAGIC);
-    const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)data;
-    int is_elf64 = 0;
-    if (file_size >= sizeof(Elf64_Ehdr) &&
-        ehdr->e_ident[0] == ELFMAG0 && ehdr->e_ident[1] == ELFMAG1 &&
-        ehdr->e_ident[2] == ELFMAG2 && ehdr->e_ident[3] == ELFMAG3 &&
-        ehdr->e_ident[4] == ELFCLASS64 && ehdr->e_machine == EM_X86_64) {
-        is_elf64 = 1;
-    }
+    uint64_t old_end = PAGE_ALIGN(current->mm->brk);
+    uint64_t new_end = PAGE_ALIGN(new_brk);
 
-    if (!is_linus001 && !is_elf64) {
-        return -1;
-    }
-
-    int argc = 0;
-    char k_argv_buf[16][64];
-    while (argv && argv[argc] && argc < 15) {
-        uint64_t len = strlen(argv[argc]);
-        if (len >= 63) len = 63;
-        memcpy(k_argv_buf[argc], argv[argc], len);
-        k_argv_buf[argc][len] = '\0';
-        argc++;
-    }
-    if (argc == 0) {
-        uint64_t len = strlen(filename);
-        if (len >= 63) len = 63;
-        memcpy(k_argv_buf[0], filename, len);
-        k_argv_buf[0][len] = '\0';
-        argc = 1;
-    }
-
-    uint64_t old_pml4 = current->cr3;
-    uint64_t new_pml4 = create_process_pml4();
-    if (!new_pml4) return -1;
-
-    current->cr3 = new_pml4;
-    __asm__ volatile ("mov %0, %%cr3" : : "r"(new_pml4) : "memory");
-
-    if (old_pml4) {
-        free_process_pml4(old_pml4);
-    }
-
-uint64_t entry_point = 0;
-    uint64_t max_vaddr = HEAP_START_VIRT;
-
-    if (is_linus001) {
-        uint64_t total_mem_size = hdr->text_size;
-        if (total_mem_size < file_size) total_mem_size = file_size;
-        if (total_mem_size > 16 * 1024 * 1024) total_mem_size = 16 * 1024 * 1024;
-
-        uint64_t total_pages = (total_mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        for (uint64_t p = 0; p < total_pages; p++) {
-            uint64_t text_phys = get_free_page();
-            if (!text_phys) return -1;
-            map_page((uint64_t *)new_pml4, USER_TEXT_BASE + (p * PAGE_SIZE), text_phys, PTE_WRITABLE | PTE_USER);
+    if (new_end > old_end) {
+        /* Диапазон не должен пересекаться с другими областями */
+        for (int i = 0; i < current->mm->nvma; i++) {
+            struct vma *v = &current->mm->vmas[i];
+            if (v->flags & VM_HEAP) continue;
+            if (v->start < new_end && v->end > old_end) return (int64_t)current->mm->brk;
         }
-        memcpy((void *)USER_TEXT_BASE, data, file_size);
-        if (total_pages * PAGE_SIZE > file_size) {
-            memset((void *)(USER_TEXT_BASE + file_size), 0, (total_pages * PAGE_SIZE) - file_size);
+        struct vma *h = heap_vma();
+        if (h) {
+            h->end = new_end;
+        } else if (vma_add(current, PAGE_ALIGN(current->mm->start_brk), new_end,
+                           VM_READ | VM_WRITE, VM_ANON | VM_HEAP) < 0) {
+            return (int64_t)current->mm->brk;
         }
-        entry_point = hdr->entry;
-        max_vaddr = USER_TEXT_BASE + total_pages * PAGE_SIZE;
-    } else if (is_elf64) {
-        entry_point = ehdr->e_entry;
-        for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-            const Elf64_Phdr *ph = (const Elf64_Phdr *)(data + ehdr->e_phoff + i * ehdr->e_phentsize);
-            if (ph->p_type != PT_LOAD) continue;
-
-            uint64_t seg_start = ph->p_vaddr;
-            uint64_t seg_end   = ph->p_vaddr + ph->p_memsz;
-            if (seg_end > max_vaddr) max_vaddr = seg_end;
-
-            uint64_t page_start = seg_start & ~0xFFFULL;
-            uint64_t page_end   = PAGE_ALIGN(seg_end);
-
-            for (uint64_t va = page_start; va < page_end; va += PAGE_SIZE) {
-                uint64_t phys = get_free_page();
-                if (!phys) return -1;
-                map_page((uint64_t *)new_pml4, va, phys, PTE_WRITABLE | PTE_USER);
-                memset((void *)va, 0, PAGE_SIZE);
-            }
-
-            if (ph->p_filesz > 0 && ph->p_offset + ph->p_filesz <= file_size) {
-                memcpy((void *)ph->p_vaddr, data + ph->p_offset, ph->p_filesz);
-            }
-        }
+    } else if (new_end < old_end) {
+        uint64_t keep = PAGE_ALIGN(current->mm->start_brk);
+        if (new_end < keep) new_end = keep;
+        vma_unmap(current, new_end, old_end);          /* освобождает страницы и сжимает VMA */
     }
 
-    uint64_t new_stack = get_free_pages(8);
-    if (!new_stack) return -1;
-
-    if (current->user_stack_page) {
-        free_pages(current->user_stack_page, 8);
-    }
-    current->user_stack_page = new_stack;
-    uint64_t user_rsp = new_stack + (8 * PAGE_SIZE) - 16;
-
-    uint64_t u_argv_ptrs[18];
-    for (int i = 0; i < argc; i++) {
-        uint64_t slen = strlen(k_argv_buf[i]) + 1;
-        user_rsp -= slen;
-        memcpy((void *)user_rsp, k_argv_buf[i], slen);
-        u_argv_ptrs[i] = user_rsp;
-    }
-    u_argv_ptrs[argc] = 0;
-
-    user_rsp &= ~15ULL;
-
-    uint64_t argv_table_size = (argc + 1) * sizeof(uint64_t);
-    user_rsp -= argv_table_size;
-    memcpy((void *)user_rsp, u_argv_ptrs, argv_table_size);
-    uint64_t argv_ptr = user_rsp;
-
-    user_rsp -= sizeof(uint64_t);
-    *(uint64_t *)user_rsp = (uint64_t)argc;
-
-    if ((user_rsp % 16) == 0) user_rsp -= 8;
-
-    current->start_brk = (max_vaddr > HEAP_START_VIRT) ? PAGE_ALIGN(max_vaddr) : HEAP_START_VIRT;
-    current->brk = current->start_brk;
-
-    for (int i = 3; i < NR_OPEN; i++) {
-        if (current->filp[i].in_use) {
-            sys_close(i);
-        }
-    }
-
-    tf->rip = entry_point;
-    tf->rsp = user_rsp;
-    tf->rbp = user_rsp;
-    tf->rdi = (uint64_t)argc;
-    tf->rsi = argv_ptr;
-    tf->rax = 0;
-    tf->rflags = 0x202;
-
-    return 0;
+    current->mm->brk = new_brk;
+    return (int64_t)current->mm->brk;
 }
+
+extern int64_t sys_execve(const char *filename, char **argv, char **envp, struct trap_frame *tf);
 
 static int64_t sys_uname(struct utsname *name)
 {
@@ -511,10 +402,10 @@ static int64_t sys_uname(struct utsname *name)
 }
 
 /* lseek: SEEK_SET=0, SEEK_CUR=1, SEEK_END=2 (END -- только для файлов ramfs и устройств /dev) */
-static int64_t sys_lseek(int fd, int64_t off, int whence)
+int64_t sys_lseek(int fd, int64_t off, int whence)
 {
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
-    struct file *f = &current->filp[fd];
+    if (fd < 0 || fd >= NR_OPEN || !current->files->f[fd].in_use) return -1;
+    struct file *f = &current->files->f[fd];
     if (f->type == FILE_TYPE_PIPE || f->type == FILE_TYPE_SOCKET) return -1;
 
     int64_t base;
@@ -535,27 +426,50 @@ int64_t sys_sync(void)
     return 0;
 }
 
-int64_t sys_exit(int status)
-{
-    printk("\n[Process %d exited with status %d]\n", (int)current->pid, status);
+extern void thread_release(struct task_struct *t);
 
+/* Закрыть все дескрипторы таблицы текущей задачи (последний пользователь таблицы) */
+static void files_close_all(void)
+{
     for (int i = 0; i < NR_OPEN; i++) {
-        if (current->filp[i].in_use) {
+        if (current->files->f[i].in_use) {
             sys_close(i);
         }
     }
+}
 
+/* Завершить остальные потоки процесса (exit_group, фатальный сигнал, execve) */
+void kill_other_threads(int status)
+{
     for (int i = 1; i < NR_TASKS; i++) {
-        if (task[i] && task[i]->father == current->pid) {
-            task[i]->father = 1;
-        }
+        struct task_struct *t = task[i];
+        if (!t || t == current || t->tgid != current->tgid || t->state == TASK_ZOMBIE) continue;
+        thread_release(t);
+        t->files->users--;
+        t->exit_code = status;
+        t->state = TASK_ZOMBIE;
     }
+}
 
-    /* Завершился корневой шелл (PID первого пользовательского процесса):
-     * как и в настоящем init, дальше работать нечему -- выключаем компьютер. */
-    if (root_task_pid >= 0 && (int)current->pid == root_task_pid) {
-        printk("[INIT] Root shell exited. Powering off...\n");
-        sys_reboot(0);
+int64_t sys_exit(int status)
+{
+
+    thread_release(current);
+    if (--current->files->users <= 0) files_close_all();
+
+    if (!current->is_thread) {
+        for (int i = 1; i < NR_TASKS; i++) {
+            if (task[i] && task[i]->father == current->pid && !task[i]->is_thread) {
+                task[i]->father = 1;
+            }
+        }
+
+        /* Завершился корневой шелл (PID первого пользовательского процесса):
+         * как и в настоящем init, дальше работать нечему -- выключаем компьютер. */
+        if (root_task_pid >= 0 && (int)current->pid == root_task_pid) {
+            printk("[INIT] Root shell exited. Powering off...\n");
+            sys_reboot(0);
+        }
     }
 
     current->exit_code = status;
@@ -565,60 +479,39 @@ int64_t sys_exit(int status)
     return 0;
 }
 
-static int64_t sys_socket(int domain, int type, int protocol)
+int64_t sys_exit_group(int status)
 {
-    (void)domain; (void)type; (void)protocol;
-    int sock_id = tcp_socket_create();
-    if (sock_id < 0) return -1;
+    kill_other_threads(status);
+    return sys_exit(status);
+}
 
-    for (int fd = 3; fd < NR_OPEN; fd++) {
-        if (!current->filp[fd].in_use) {
-            current->filp[fd].type = FILE_TYPE_SOCKET;
-            current->filp[fd].sock_id = sock_id;
-            current->filp[fd].in_use = 1;
-            current->filp[fd].mode = 3; /* Read/Write */
-            return fd;
-        }
+#include <linux/ip.h>
+static int64_t sys_netctl(int cmd, uint64_t a1)
+{
+    switch (cmd) {
+    case NETCTL_INFO: {
+        if (!user_access_ok(a1, sizeof(struct net_info), 1)) return -1;
+        struct net_info ni;
+        int r = net_get_info(&ni);
+        memcpy((void *)a1, &ni, sizeof(ni));
+        return r;
     }
-    tcp_socket_close(sock_id);
+    case NETCTL_DHCP:
+        return net_dhcp_renew();
+    }
     return -1;
 }
 
-static int64_t sys_bind(int fd, uint16_t port)
+extern int64_t linux_syscall(struct trap_frame *tf);
+
+/* Вход из syscall_entry.S: tf -- полный кадр пользователя */
+void syscall_entry_c(struct trap_frame *tf)
 {
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
-    if (current->filp[fd].type != FILE_TYPE_SOCKET) return -1;
-    return tcp_socket_bind(current->filp[fd].sock_id, port);
-}
-
-static int64_t sys_listen(int fd, int backlog)
-{
-    (void)backlog;
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
-    if (current->filp[fd].type != FILE_TYPE_SOCKET) return -1;
-    return tcp_socket_listen(current->filp[fd].sock_id);
-}
-
-static int64_t sys_accept(int fd)
-{
-    if (fd < 0 || fd >= NR_OPEN || !current->filp[fd].in_use) return -1;
-    if (current->filp[fd].type != FILE_TYPE_SOCKET) return -1;
-
-    int client_sock = tcp_socket_accept(current->filp[fd].sock_id);
-    if (client_sock < 0) return -1;
-
-    /* Ищем свободный дескриптор, исключая дескриптор самого сервера */
-    for (int nfd = fd + 1; nfd < NR_OPEN; nfd++) {
-        if (!current->filp[nfd].in_use) {
-            current->filp[nfd].type = FILE_TYPE_SOCKET;
-            current->filp[nfd].sock_id = client_sock;
-            current->filp[nfd].in_use = 1;
-            current->filp[nfd].mode = 3;
-            return nfd;
-        }
+    if (current->linux_abi) {
+        linux_syscall(tf);          /* сам записывает результат в tf->rax */
+        return;
     }
-    tcp_socket_close(client_sock);
-    return -1;
+    tf->rax = (uint64_t)syscall_dispatcher(tf->rax, tf->rdi, tf->rsi, tf->rdx, tf->r10, tf);
 }
 
 int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, struct trap_frame *tf)
@@ -721,17 +614,8 @@ int64_t syscall_dispatcher(uint64_t nr, uint64_t arg1, uint64_t arg2, uint64_t a
         case __NR_exit:
             ret = sys_exit((int)arg1);
             break;
-        case __NR_socket:
-            ret = sys_socket((int)arg1, (int)arg2, (int)arg3);
-            break;
-        case __NR_bind:
-            ret = sys_bind((int)arg1, (uint16_t)arg2);
-            break;
-        case __NR_listen:
-            ret = sys_listen((int)arg1, (int)arg2);
-            break;
-        case __NR_accept:
-            ret = sys_accept((int)arg1);
+        case __NR_netctl:
+            ret = sys_netctl((int)arg1, arg2);
             break;
         default:
             printk("[SYSCALL] Unknown syscall: %d\n", nr);
